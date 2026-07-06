@@ -93,6 +93,70 @@
       nixosConfigurations.wawona-mobile-guest =
         import ./dependencies/vms/mobile/guest.nix { inherit nixpkgs; };
 
+      # Host-tool shell for the vendored UTM engine build (build_dependencies.sh).
+      # The script was written for Homebrew hosts; this shell provides the same
+      # tools from nixpkgs plus a tiny `brew` shim that answers the script's
+      # `brew --prefix <pkg>` probes, so no Homebrew install is needed.
+      #   nix develop .#utm-engine -c \
+      #     ./dependencies/vms/utm/scripts/build_dependencies.sh -p ios-tci -a arm64
+      devShells = forAll (system:
+        let
+          pkgs = pkgsFor system;
+          pythonEnv = pkgs.python3.withPackages (ps: with ps; [
+            six
+            pyparsing
+            setuptools
+            pyyaml
+            distlib
+            mako
+            packaging
+          ]);
+          brewShim = pkgs.writeShellScriptBin "brew" ''
+            # Minimal Homebrew shim for build_dependencies.sh: only `--prefix <pkg>`
+            # is ever called (check_env probes + mesa host build's llvm path).
+            if [ "$1" = "--prefix" ]; then
+              case "''${2:-}" in
+                llvm) echo "${pkgs.llvmPackages.llvm}" ;;
+                spirv-llvm-translator) echo "${pkgs.spirv-llvm-translator}" ;;
+                libxcb) echo "${pkgs.libxcb.dev}" ;;
+                libxrandr) echo "${pkgs.libxrandr.dev}" ;;
+                *) echo "brew shim: unknown package ''${2:-}" >&2; exit 1 ;;
+              esac
+              exit 0
+            fi
+            echo "brew shim: only '--prefix <pkg>' is supported (got: $*)" >&2
+            exit 1
+          '';
+        in {
+          utm-engine = pkgs.mkShell {
+            packages = [
+              brewShim
+              pythonEnv
+              pkgs.meson
+              pkgs.ninja
+              pkgs.cmake
+              pkgs.bison
+              pkgs.pkg-config
+              pkgs.gettext          # msgfmt
+              pkgs.glib.dev         # glib-mkenums, glib-compile-resources
+              pkgs.libgpg-error.dev # gpg-error-config
+              pkgs.nasm
+              pkgs.curl
+              pkgs.git
+              pkgs.coreutils
+            ];
+            shellHook = ''
+              # The script drives Apple SDKs (iphoneos/xros/...) via xcrun; nix's
+              # darwin stdenv points DEVELOPER_DIR/SDKROOT at the nix macOS SDK
+              # which has no mobile SDKs — restore the host Xcode toolchain.
+              unset CC CXX LD AR NM RANLIB STRIP CPP OBJCC SDKROOT
+              # xcode-select echoes $DEVELOPER_DIR back, so query with it cleared.
+              export DEVELOPER_DIR="$(env -u DEVELOPER_DIR /usr/bin/xcode-select --print-path)"
+              echo "utm-engine shell: nix host tools + brew shim; DEVELOPER_DIR=$DEVELOPER_DIR"
+            '';
+          };
+        });
+
       formatter = forAll (system: (pkgsFor system).nixfmt-rfc-style);
     };
 }
