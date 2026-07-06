@@ -160,6 +160,16 @@
               ln -sf /usr/bin/sed /usr/bin/find /usr/bin/basename /usr/bin/dirname "$_bsdbin/"
               ln -sf /bin/cp /bin/rm /bin/mv /bin/ln /bin/ls /bin/chmod "$_bsdbin/"
               export PATH="$_bsdbin:$PATH"
+              # The nix shell exports PKG_CONFIG_PATH entries for its own .dev
+              # packages (glib, libffi, ...) which are macOS builds; the cross
+              # build must only see the iOS sysroot's .pc files (the script
+              # builds its own pkg-config pinned to the sysroot). Drop them.
+              unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR
+              # Xcode 26's ld warns "-single_module is obsolete", which makes
+              # libtool's lt_cv_apple_cc_single_mod probe (requires empty stderr)
+              # conclude "no" and take a master-object fallback link that drops
+              # the -target flag (links iOS objects for macOS). Preseed the cache.
+              export lt_cv_apple_cc_single_mod=yes
               echo "utm-engine shell: nix host tools + brew shim + BSD sed/cp; DEVELOPER_DIR=$DEVELOPER_DIR"
             '';
           };
