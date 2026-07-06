@@ -1,7 +1,12 @@
 # Kernel + ext4 rootfs artifacts for the mobile QEMU-TCTI guest.
 #
-# Builds on aarch64-linux (Determinate builder on macOS is fine). The engine
-# passes these as bundled / ODR data into the iOS app (never downloaded code).
+# Builds on aarch64-linux. NOTE: a *real* Linux builder (CI ubuntu-24.04-arm,
+# see .github/workflows/guest-artifacts.yml) is required, NOT the Determinate
+# native Linux builder on a case-insensitive macOS store: that builder shares
+# /nix/store over virtiofs, exposing raw case-hack names (`l~nix~case~hack~1`,
+# e.g. ncurses terminfo) which break make-initrd-ng and would poison the
+# rootfs image (NixOS/nix#9319). The engine passes these artifacts as bundled
+# / ODR data into the iOS app (never downloaded code).
 {
   pkgs,
   lib ? pkgs.lib,
