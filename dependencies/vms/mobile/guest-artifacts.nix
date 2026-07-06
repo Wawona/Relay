@@ -32,14 +32,17 @@ pkgs.runCommand "wawona-mobile-guest-artifacts" {
   passthru.kernel = kernel;
 } ''
   mkdir -p $out
-  if [ -f ${kernel}/zImage ]; then
-    cp ${kernel}/zImage $out/zImage
-  elif [ -f ${kernel}/bzImage ]; then
-    cp ${kernel}/bzImage $out/vmlinuz
-  elif [ -f ${kernel}/vmlinux ]; then
-    cp ${kernel}/vmlinux $out/vmlinux
-  else
-    echo "No kernel image found in ${kernel}" >&2
+  # aarch64 kernels ship as "Image"; other arches as bzImage/zImage/vmlinux.
+  # Ship under the canonical "Image" name (what the engine/runner probe first).
+  for candidate in Image bzImage zImage vmlinux; do
+    if [ -f ${kernel}/$candidate ]; then
+      cp ${kernel}/$candidate $out/Image
+      break
+    fi
+  done
+  if [ ! -f $out/Image ]; then
+    echo "No kernel image found in ${kernel}:" >&2
+    ls ${kernel} >&2
     exit 1
   fi
   cp ${makeDiskImage}/nixos.raw $out/rootfs.img
