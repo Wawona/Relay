@@ -30,9 +30,15 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
         with:
           determinate: true
+          # GitHub arm64 runners have no /dev/kvm, but make-disk-image only
+          # *declares* requiredSystemFeatures = ["kvm"]; the aarch64 qemu
+          # invocation uses accel=kvm:tcg and falls back to TCG. Advertise the
+          # feature so Nix schedules the image build.
+          extra-conf: |
+            extra-system-features = kvm
 
       - name: KVM diagnostics
-        run: ls -l /dev/kvm || echo "no /dev/kvm (vmTools image build may fall back or fail)"
+        run: ls -l /dev/kvm || echo "no /dev/kvm; image build will use TCG (accel=kvm:tcg fallback)"
 
       - name: Build guest artifacts
         run: nix build .#packages.aarch64-linux.wawona-mobile-guest-artifacts -L
