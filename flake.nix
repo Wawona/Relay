@@ -40,24 +40,24 @@
       #   vm-engine    the per-target hypervisor/emulator backend
       registryFragment = {
         nixos-vm = withPlatformVariants {
-          macos = dir + "/stub.nix";
-          ios = dir + "/stub.nix";
-          ipados = dir + "/stub.nix";
-          tvos = dir + "/stub.nix";
-          visionos = dir + "/stub.nix";
+          macos = dir + "/microvm-guest.nix";
+          ios = dir + "/mobile/guest.nix";
+          ipados = dir + "/mobile/guest.nix";
+          tvos = dir + "/mobile/guest.nix";
+          visionos = dir + "/mobile/guest.nix";
           watchos = dir + "/stub.nix";
-          android = dir + "/stub.nix";
+          android = dir + "/mobile/guest.nix";
           wearos = dir + "/stub.nix";
         };
         vm-engine = withPlatformVariants {
-          macos = dir + "/stub.nix";
-          ios = dir + "/stub.nix";
-          ipados = dir + "/stub.nix";
-          tvos = dir + "/stub.nix";
-          visionos = dir + "/stub.nix";
-          watchos = dir + "/stub.nix";
-          android = dir + "/stub.nix";
-          wearos = dir + "/stub.nix";
+          macos = dir + "/macos/engine.nix";
+          ios = dir + "/mobile/engine.nix";
+          ipados = dir + "/mobile/engine.nix";
+          tvos = dir + "/mobile/engine.nix";
+          visionos = dir + "/mobile/engine.nix";
+          watchos = dir + "/watchos/engine.nix";
+          android = dir + "/android/engine.nix";
+          wearos = dir + "/wearos/engine.nix";
         };
       };
 
@@ -221,6 +221,27 @@
               export lt_cv_apple_cc_single_mod=yes
               echo "utm-engine shell: nix host tools + brew shim + BSD sed/cp; DEVELOPER_DIR=$DEVELOPER_DIR"
             '';
+          };
+        });
+
+      packages = forAll (system:
+        let
+          pkgs = pkgsFor system;
+          lib = nixpkgs.lib;
+          utm = self.lib.utm;
+          mobileGuest = self.nixosConfigurations.wawona-mobile-guest;
+        in
+        lib.optionalAttrs (lib.hasSuffix "-darwin" system) {
+          wwn-vms-mobile-engine-ios-tci = pkgs.callPackage ./dependencies/vms/mobile/engine.nix {
+            inherit utm;
+            self = self;
+            applePlatform = "ios-tci";
+            arch = "arm64";
+          };
+        }
+        // lib.optionalAttrs (system == "aarch64-linux") {
+          wawona-mobile-guest-artifacts = pkgs.callPackage ./dependencies/vms/mobile/guest-artifacts.nix {
+            inherit mobileGuest;
           };
         });
 

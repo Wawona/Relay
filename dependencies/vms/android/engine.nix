@@ -24,11 +24,15 @@
 }:
 
 assert builtins.pathExists utm.qemuUtmPatch;
-throw ''
-  wwn-vms Android engine (${accel}): the vendored UTM sources are present
-  (${toString utm.dir}) but the cross-build is not wired yet. Next:
-  cross-compile QEMU (TCG+JIT) from utm.qemuUtmPatch through wwn-toolchain's
-  Android NDK toolchain and boot ../mobile/guest.nix. AVF/KVM acceleration is
-  used opportunistically where the device exposes it; QEMU-JIT is the portable
-  fallback. JIT is permitted on Android (Play-Store compliant).
+
+pkgs.writeTextDir "README" ''
+  wwn-vms Android engine (${accel}): vendored UTM QEMU + mobile NixOS guest.
+
+  Status: registry anchor only — cross-build through wwn-toolchain NDK is next.
+  Guest: wwn-vms/dependencies/vms/mobile/guest.nix
+  Sources: ${toString utm.dir}
+
+  Wawona integration: MainActivity.kt VM lane → JNI loader for libqemu + guest
+  artifacts (same kernel/rootfs.img as iOS). AVF/KVM used opportunistically;
+  QEMU-JIT is the portable fallback.
 ''

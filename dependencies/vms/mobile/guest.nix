@@ -77,9 +77,8 @@ nixpkgs.lib.nixosSystem {
           };
           script = ''
             mkdir -p "$XDG_RUNTIME_DIR"
-            exec ${pkgs.waypipe}/bin/waypipe \
-              --socket vsock:2:${toString vsockPort} \
-              server -- ${pkgs.cage}/bin/cage -- ${pkgs.foot}/bin/foot
+            exec ${pkgs.waypipe}/bin/waypipe --vsock -s ${toString vsockPort} server -- \
+              ${pkgs.cage}/bin/cage -- ${pkgs.foot}/bin/foot
           '';
         };
 
