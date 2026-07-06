@@ -12,14 +12,9 @@
     # to build the guest + drive vfkit (Virtualization.framework).
     microvm.url = "github:microvm-nix/microvm.nix";
     microvm.inputs.nixpkgs.follows = "nixpkgs";
-    # Mobile (iOS/iPadOS/tvOS/visionOS) + Android jitless QEMU-TCTI engine source:
-    # the aligned UTM fork (wwn-utm) = github:Wawona/UTM. Consumed by
-    # mobile/engine.nix + android/engine.nix (their `wwn-utm` arg).
-    wwn-utm.url = "github:Wawona/UTM";
-    wwn-utm.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, wwn-toolchain, microvm, wwn-utm, ... }:
+  outputs = { self, nixpkgs, rust-overlay, wwn-toolchain, microvm, ... }:
     let
       darwinSystems = [ "x86_64-darwin" "aarch64-darwin" ];
       linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
@@ -66,10 +61,25 @@
         };
       };
 
-      # The aligned UTM fork, surfaced for downstream engine assembly + so the
-      # input is a concrete dependency (mobile/engine.nix + android/engine.nix
-      # take `wwn-utm` and use wwn-utm.lib for the QEMU-TCTI sources/patches).
-      lib.wwn-utm = wwn-utm;
+      # Vendored UTM engine sources (QEMU-TCTI patches + build machinery + VZ
+      # reference backends) — formerly the separate `wwn-utm` repo, now folded
+      # in-repo so wwn-vms is self-contained (see dependencies/vms/utm/README.md).
+      # mobile/engine.nix + android/engine.nix consume these paths via their
+      # `utm` argument.
+      lib.utm = {
+        dir = dir + "/utm";
+        qemuUtmPatch = dir + "/utm/patches/qemu-10.0.2-utm.patch";
+        patchesDir = dir + "/utm/patches";
+        buildDependenciesScript = dir + "/utm/scripts/build_dependencies.sh";
+        packDependenciesScript = dir + "/utm/scripts/pack_dependencies.sh";
+        sources = {
+          qemuSystem = dir + "/utm/sources/UTMQemuSystem.m";
+          qemuVirtualMachine = dir + "/utm/sources/UTMQemuVirtualMachine.swift";
+          appleVirtualMachine = dir + "/utm/sources/UTMAppleVirtualMachine.swift";
+          qemuProcess = dir + "/utm/sources/UTMProcess.m";
+        };
+        seScheme = dir + "/utm/xcschemes/iOS-SE.xcscheme";
+      };
 
       # Per-target VM capability matrix (with eval-time invariant asserts).
       # `nix eval .#lib.capabilities` is the VM capability-lane gate.
@@ -79,7 +89,7 @@
       # (iOS/iPadOS/visionOS/tvOS). Evaluable everywhere; the kernel/rootfs
       # artifacts build on the aarch64-linux builder and ship as ODR/bundled data
       # (COMPLIANCE.md). The engine that boots it is dependencies/vms/mobile/engine.nix
-      # (sourced from wwn-utm; see align-wwn-utm).
+      # (built from the vendored UTM sources in lib.utm).
       nixosConfigurations.wawona-mobile-guest =
         import ./dependencies/vms/mobile/guest.nix { inherit nixpkgs; };
 

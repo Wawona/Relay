@@ -106,8 +106,7 @@
         "microvm": "microvm",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",
-        "wwn-toolchain": "wwn-toolchain",
-        "wwn-utm": "wwn-utm"
+        "wwn-toolchain": "wwn-toolchain"
       }
     },
     "rust-overlay": {
@@ -182,26 +181,6 @@
       "original": {
         "owner": "Wawona",
         "repo": "wwn-toolchain",
-        "type": "github"
-      }
-    },
-    "wwn-utm": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1783288156,
-        "narHash": "sha256-RJTkNROqNRqdJZEp4QBLewlv+pMieh3XkcfDLQG5/w4=",
-        "owner": "Wawona",
-        "repo": "UTM",
-        "rev": "51e1a7f44b63c6511c349aecb6619b6a7b6dbca1",
-        "type": "github"
-      },
-      "original": {
-        "owner": "Wawona",
-        "repo": "UTM",
         "type": "github"
       }
     }

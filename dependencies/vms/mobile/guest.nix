@@ -9,7 +9,7 @@
 #
 # Evaluates on any host; the kernel/rootfs artifacts build on the aarch64-linux
 # builder (Determinate native Linux builder on macOS). The QEMU-TCTI *engine*
-# that boots this guest is engine.nix (sourced from wwn-utm).
+# that boots this guest is engine.nix (built from the vendored UTM sources in ../utm).
 {
   nixpkgs,
   guestSystem ? "aarch64-linux",

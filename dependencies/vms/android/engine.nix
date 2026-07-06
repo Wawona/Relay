@@ -6,31 +6,29 @@
 #     / KVM where the device+ROM expose it (Pixel 6+, GrapheneOS, etc.).
 # Play-Store compliant (JIT is allowed on Android).
 #
-# The QEMU sources come from `wwn-utm` (same emulator as the Apple mobile path,
-# built with JIT enabled for Android) cross-compiled through `wwn-toolchain`'s
-# Android NDK toolchain. The guest is the same bundled minimal NixOS aarch64
-# image (../mobile/guest.nix).
-#
-# Evaluates cleanly; throws with precise next-steps until `wwn-utm` is aligned
-# and added as a wwn-vms input (align-wwn-utm).
+# The QEMU sources are the VENDORED UTM patchset in ../utm (same emulator as
+# the Apple mobile path, built with JIT enabled for Android) cross-compiled
+# through `wwn-toolchain`'s Android NDK toolchain. The guest is the same
+# bundled minimal NixOS aarch64 image (../mobile/guest.nix).
 {
   pkgs,
   lib ? pkgs.lib,
   # "qemu-jit" (portable, always available) or "avf" (needs device support).
   accel ? "qemu-jit",
-  wwn-utm ? null,
+  # Vendored UTM engine paths (wwn-vms `lib.utm` from the flake).
+  utm ? {
+    dir = ../utm;
+    qemuUtmPatch = ../utm/patches/qemu-10.0.2-utm.patch;
+    buildDependenciesScript = ../utm/scripts/build_dependencies.sh;
+  },
 }:
 
-if wwn-utm == null then
-  throw ''
-    wwn-vms Android engine (${accel}) needs the aligned `wwn-utm` input
-    (align-wwn-utm). It cross-compiles QEMU (TCG+JIT) through wwn-toolchain's
-    Android NDK toolchain and boots ../mobile/guest.nix. AVF/KVM acceleration is
-    used opportunistically where the device exposes it; QEMU-JIT is the portable
-    fallback. JIT is permitted on Android (Play-Store compliant).
-  ''
-else
-  pkgs.runCommand "wwn-vms-android-engine-${accel}" { } ''
-    mkdir -p "$out"
-    echo "assemble QEMU(${accel})/AVF from wwn-utm + mobile guest here" > "$out/README"
-  ''
+assert builtins.pathExists utm.qemuUtmPatch;
+throw ''
+  wwn-vms Android engine (${accel}): the vendored UTM sources are present
+  (${toString utm.dir}) but the cross-build is not wired yet. Next:
+  cross-compile QEMU (TCG+JIT) from utm.qemuUtmPatch through wwn-toolchain's
+  Android NDK toolchain and boot ../mobile/guest.nix. AVF/KVM acceleration is
+  used opportunistically where the device exposes it; QEMU-JIT is the portable
+  fallback. JIT is permitted on Android (Play-Store compliant).
+''

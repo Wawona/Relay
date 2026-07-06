@@ -2,42 +2,44 @@
 #
 # On these targets there is no Hypervisor.framework, so the ceiling is the UTM
 # SE model: jitless QEMU using TCTI (Tiny Code Threaded Interpreter) — an
-# App-Store-approved precedent. The engine sources come from `wwn-utm` (the
-# aligned UTM fork; see align-wwn-utm), which carries the TCTI patches and the
-# iOS build machinery. We do NOT vendor a second QEMU here — wwn-utm is the one
-# source of truth for the emulator.
+# App-Store-approved precedent. The engine sources are VENDORED in-repo at
+# ../utm (patches incl. qemu-10.0.2-utm.patch, build_dependencies.sh, reference
+# backends) — see ../utm/README.md for provenance. No external UTM repo.
 #
-# Build inputs (wired once wwn-utm is a flake input of wwn-vms):
-#   * wwn-utm QEMU-TCTI xcframework (per Apple target/arch/simulator)
+# Build inputs:
+#   * ../utm vendored QEMU-TCTI patchset + dependency build machinery
 #   * a bundled minimal NixOS guest (./guest.nix) as ODR/bundled data
 #   * wwn-waypipe (vsock Wayland transport) for the guest->Wawona GUI bridge
 #   * wwn-toolchain cross toolchains (buildForIOS/…)
 #
-# Until wwn-utm is aligned + added as an input, this evaluates cleanly (so the
-# registry merges and target enumeration works) but fails the build with a
-# precise message rather than pretending to produce an emulator.
+# Until the full cross-build is wired, this evaluates cleanly (so the registry
+# merges and target enumeration works) but fails the build with a precise
+# message rather than pretending to produce an emulator.
 {
   pkgs,
   lib ? pkgs.lib,
   # The Apple platform this engine targets (informational; the real derivation
-  # picks the matching wwn-utm xcframework slice).
+  # picks the matching platform/arch slice in build_dependencies.sh).
   applePlatform ? "ios",
-  # Set by wwn-vms' flake once wwn-utm is an input.
-  wwn-utm ? null,
+  # Vendored UTM engine paths (wwn-vms `lib.utm` from the flake). Defaults to
+  # the in-repo location so this file also works via direct callPackage.
+  utm ? {
+    dir = ../utm;
+    qemuUtmPatch = ../utm/patches/qemu-10.0.2-utm.patch;
+    buildDependenciesScript = ../utm/scripts/build_dependencies.sh;
+  },
 }:
 
-if wwn-utm == null then
-  throw ''
-    wwn-vms mobile engine (QEMU-TCTI) for ${applePlatform} needs the aligned
-    `wwn-utm` input (align-wwn-utm todo). Once wwn-utm exposes its jitless
-    QEMU-TCTI xcframework, this derivation links it against the bundled NixOS
-    guest (./guest.nix) + wwn-waypipe and produces the embeddable engine.
-    No JIT, no Hypervisor.framework — TCTI is the honest ceiling (COMPLIANCE.md).
-  ''
-else
-  # Placeholder for the real assembly once the input lands. Kept as a lambda so
-  # the shape of the eventual derivation (guest + engine + transport) is visible.
-  pkgs.runCommand "wwn-vms-mobile-engine-${applePlatform}" { } ''
-    mkdir -p "$out"
-    echo "assemble QEMU-TCTI (${applePlatform}) from wwn-utm + guest.nix here" > "$out/README"
-  ''
+# Shape of the eventual derivation (guest + engine + transport). The real
+# cross-build drives utm.buildDependenciesScript (`-p ios -a arm64` etc., TCTI
+# scheme) under wwn-toolchain's Apple cross toolchains.
+assert builtins.pathExists utm.qemuUtmPatch;
+throw ''
+  wwn-vms mobile engine (QEMU-TCTI) for ${applePlatform}: the vendored UTM
+  sources are present (${toString utm.dir}) but the cross-build is not wired
+  yet. Next: run utm.buildDependenciesScript through wwn-toolchain's
+  ${applePlatform} toolchain (jitless TCTI configuration, no MAP_JIT), link the
+  bundled NixOS guest (./guest.nix) + wwn-waypipe, and emit the embeddable
+  engine framework. No JIT, no Hypervisor.framework — TCTI is the honest
+  ceiling (COMPLIANCE.md).
+''

@@ -22,7 +22,8 @@ path).
   native `wawona-vz` Swift launcher. `writableStoreOverlay` + virtiofs ro-store
   guest (no `make-disk-image`/KVM). Rosetta for x86_64 guests. Requires the
   `com.apple.security.virtualization` entitlement; not Mac App Store viable.
-- **iOS / iPadOS**: jitless **QEMU-TCTI** (UTM SE model) from `wwn-utm`. No
+- **iOS / iPadOS**: jitless **QEMU-TCTI** (UTM SE model) from the **vendored
+  UTM engine sources in-repo** (`dependencies/vms/utm/`). No
   `Hypervisor.framework` on iOS, so TCTI is the ceiling; App-Store-approved
   precedent (UTM SE). NixOS `aarch64-linux` guest shipped as bundled / On-Demand
   Resources data - never downloaded executable code.
@@ -47,18 +48,21 @@ QEMU TCG tuning, warmed translation blocks. No JIT is attempted (App Store rule)
   `nixosConfigurations.wawona-mobile-guest`; kernel/rootfs build on the
   aarch64-linux builder and ship as bundled / On-Demand-Resource **data**.
 - `dependencies/vms/mobile/engine.nix` - the jitless **QEMU-TCTI** engine recipe.
-  Sourced from `wwn-utm`, now wired as a flake input (`wwn-vms.lib.wwn-utm`;
-  exposes `qemuUtmPatch`, the dependency build scripts, and the UTM SE Xcode
-  scheme). The recipe cross-compiles that through `wwn-toolchain`; it still
-  throws with precise next-steps until the full cross-build lands. TCTI is the
-  honest ceiling (no Hypervisor.framework on iOS).
+  Built from the **vendored UTM sources** at `dependencies/vms/utm/` (exposed as
+  `wwn-vms.lib.utm`: `qemuUtmPatch`, the dependency build scripts, reference
+  backends, and the UTM SE Xcode scheme — see `dependencies/vms/utm/README.md`
+  for provenance). The former separate `wwn-utm` repo/flake-input is gone; the
+  engine unit lives in-repo. The recipe cross-compiles through `wwn-toolchain`;
+  it still throws with precise next-steps until the full cross-build lands.
+  TCTI is the honest ceiling (no Hypervisor.framework on iOS).
 
 ## Android engine
 
 `dependencies/vms/android/engine.nix` - QEMU with **TCG + JIT** (JIT is allowed
 on Android, so this beats the iOS TCTI ceiling) plus opportunistic AVF/KVM where
-the device exposes it. Cross-compiled from `wwn-utm` through `wwn-toolchain`'s
-Android NDK toolchain; boots the same `mobile/guest.nix`. Play-Store compliant.
+the device exposes it. Cross-compiled from the vendored UTM sources
+(`dependencies/vms/utm/`) through `wwn-toolchain`'s Android NDK toolchain; boots
+the same `mobile/guest.nix`. Play-Store compliant.
 
 ## Port plan
 
@@ -67,8 +71,9 @@ Android NDK toolchain; boots the same `mobile/guest.nix`. Play-Store compliant.
 2. Relocate the working macOS path here: `microvm-guest.nix`, `vz-launcher.nix`,
    `WawonaLinuxVZ.swift` (from Wawona), keep flake apps `wawona-microvm` /
    `wawona-vm-bridge`.
-3. Bring up the QEMU-TCTI engine from `wwn-utm` for iOS/iPadOS/visionOS/tvOS with
-   bundled minimal NixOS guests.
+3. Bring up the QEMU-TCTI engine from the vendored UTM sources
+   (`dependencies/vms/utm/`) for iOS/iPadOS/visionOS/tvOS with bundled minimal
+   NixOS guests.
 4. Android engine (QEMU/AVF).
 5. Replace `dependencies/vms/stub.nix` with per-platform derivations; expose
    `nixos-vm-{macos,ios,android,...}` and `vm-engine-*` packages.
