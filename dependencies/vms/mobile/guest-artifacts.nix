@@ -11,8 +11,9 @@
   pkgs,
   lib ? pkgs.lib,
   mobileGuest,
-  # ext4 root disk size for the trimmed NixOS closure.
-  diskSize ? "1024M",
+  # ext4 root disk size for the trimmed NixOS closure, in megabytes
+  # (make-disk-image appends the M unit itself).
+  diskSize ? "1024",
 }:
 let
   kernel = mobileGuest.config.boot.kernelPackages.kernel;
