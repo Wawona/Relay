@@ -12,9 +12,17 @@
 #   * wwn-waypipe (vsock Wayland transport) for the guest->Wawona GUI bridge
 #   * wwn-toolchain cross toolchains (buildForIOS/…)
 #
-# Until the full cross-build is wired, this evaluates cleanly (so the registry
-# merges and target enumeration works) but fails the build with a precise
-# message rather than pretending to produce an emulator.
+# BUILD STATUS (2026-07-05): the engine cross-build is VERIFIED end-to-end on
+# macOS 26 / Xcode 26 via the flake's `utm-engine` dev shell:
+#   nix develop wwn-vms#utm-engine -c /bin/sh \
+#     dependencies/vms/utm/scripts/build_dependencies.sh -p ios-tci -a arm64
+# producing sysroot-iOS-TCI-arm64 (63 iOS frameworks: qemu-*-softmmu with
+# tcg_threaded_interpreter=True, ANGLE, MoltenVK, spice, virglrenderer, ...).
+# Requires Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain).
+#
+# This nix derivation is still a stub: wrapping that impure Xcode-driven build
+# as a fixed-output/sandbox-relaxed derivation (or importing the prebuilt
+# sysroot) is the remaining packaging step.
 {
   pkgs,
   lib ? pkgs.lib,
@@ -35,11 +43,11 @@
 # scheme) under wwn-toolchain's Apple cross toolchains.
 assert builtins.pathExists utm.qemuUtmPatch;
 throw ''
-  wwn-vms mobile engine (QEMU-TCTI) for ${applePlatform}: the vendored UTM
-  sources are present (${toString utm.dir}) but the cross-build is not wired
-  yet. Next: run utm.buildDependenciesScript through wwn-toolchain's
-  ${applePlatform} toolchain (jitless TCTI configuration, no MAP_JIT), link the
-  bundled NixOS guest (./guest.nix) + wwn-waypipe, and emit the embeddable
-  engine framework. No JIT, no Hypervisor.framework — TCTI is the honest
-  ceiling (COMPLIANCE.md).
+  wwn-vms mobile engine (QEMU-TCTI) for ${applePlatform}: the engine BUILD is
+  verified (see header: `nix develop wwn-vms#utm-engine` + ios-tci arm64 gives
+  the full framework sysroot), but it is Xcode-driven and not yet wrapped as a
+  pure nix derivation. Run the dev-shell build, or wire the sysroot import
+  here. Then link the bundled NixOS guest (./guest.nix) + wwn-waypipe into the
+  embeddable engine framework. No JIT, no Hypervisor.framework — TCTI is the
+  honest ceiling (COMPLIANCE.md).
 ''
