@@ -152,7 +152,15 @@
               unset CC CXX LD AR NM RANLIB STRIP CPP OBJCC SDKROOT
               # xcode-select echoes $DEVELOPER_DIR back, so query with it cleared.
               export DEVELOPER_DIR="$(env -u DEVELOPER_DIR /usr/bin/xcode-select --print-path)"
-              echo "utm-engine shell: nix host tools + brew shim; DEVELOPER_DIR=$DEVELOPER_DIR"
+              # build_dependencies.sh relies on BSD tool semantics (`sed -i '''`,
+              # `cp -r` following a command-line symlink like IOKit's Headers).
+              # The nix stdenv fronts GNU sed/cp, so front the host BSD ones.
+              _bsdbin="$(mktemp -d)/bsd"
+              mkdir -p "$_bsdbin"
+              ln -sf /usr/bin/sed /usr/bin/find /usr/bin/basename /usr/bin/dirname "$_bsdbin/"
+              ln -sf /bin/cp /bin/rm /bin/mv /bin/ln /bin/ls /bin/chmod "$_bsdbin/"
+              export PATH="$_bsdbin:$PATH"
+              echo "utm-engine shell: nix host tools + brew shim + BSD sed/cp; DEVELOPER_DIR=$DEVELOPER_DIR"
             '';
           };
         });
