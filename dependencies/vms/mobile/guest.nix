@@ -83,6 +83,11 @@ nixpkgs.lib.nixosSystem {
         };
 
         # Trim the closure hard for the mobile RAM/space ceiling.
+        # No Nix inside the guest: drops nix-daemon AND the pinned nixpkgs
+        # flake-registry/NIX_PATH source (~400MB of nixpkgs tree in the image).
+        nix.enable = false;
+        nixpkgs.flake.setNixPath = false;
+        nixpkgs.flake.setFlakeRegistry = false;
         documentation.enable = false;
         documentation.nixos.enable = false;
         documentation.man.enable = false;
