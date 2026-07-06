@@ -111,12 +111,58 @@
             mako
             packaging
           ]);
+          # mesa's host mesa-clc build expects a Homebrew-style llvm prefix that
+          # contains llvm-config AND clang; combine the nix outputs.
+          llvmHost = pkgs.symlinkJoin {
+            name = "llvm-host";
+            paths = with pkgs.llvmPackages; [
+              llvm
+              llvm.dev
+              llvm.lib
+              clang-unwrapped
+              clang-unwrapped.dev
+              clang-unwrapped.lib
+            ];
+            # llvm-config reports the split llvm.lib store path; rewrite it to
+            # this merged prefix so mesa finds the clang libs next to LLVM's.
+            postBuild = ''
+              rm -f $out/bin/llvm-config
+              cat > $out/bin/llvm-config <<EOF
+              #!/bin/sh
+              exec_prefix_fixup() { ${pkgs.gnused}/bin/sed -e "s|${pkgs.llvmPackages.llvm.lib}|$out|g" -e "s|${pkgs.llvmPackages.llvm.dev}|$out|g"; }
+              ${pkgs.llvmPackages.llvm.dev}/bin/llvm-config "\$@" | exec_prefix_fixup
+              EOF
+              ${pkgs.gnused}/bin/sed -i 's/^              //' $out/bin/llvm-config
+              chmod +x $out/bin/llvm-config
+            '';
+          };
+          mesaHostPkgConfigPath = pkgs.lib.concatStringsSep ":" (
+            pkgs.lib.concatMap (p: [ "${p}/lib/pkgconfig" "${p}/share/pkgconfig" ]) [
+              pkgs.libclc.dev
+              pkgs.libclc
+              pkgs.spirv-tools.dev
+              pkgs.spirv-tools
+              pkgs.spirv-llvm-translator
+              # X11 stack for mesa's host build (same role as Homebrew's
+              # libxcb/libxrandr in UTM's check_env).
+              pkgs.libxcb.dev
+              pkgs.libx11.dev
+              pkgs.libxrandr.dev
+              pkgs.libxrender.dev
+              pkgs.libxext.dev
+              pkgs.libxfixes.dev
+              pkgs.libxau.dev
+              pkgs.libxdmcp.dev
+              pkgs.libxshmfence.dev
+              pkgs.xorgproto
+            ]
+          );
           brewShim = pkgs.writeShellScriptBin "brew" ''
             # Minimal Homebrew shim for build_dependencies.sh: only `--prefix <pkg>`
             # is ever called (check_env probes + mesa host build's llvm path).
             if [ "$1" = "--prefix" ]; then
               case "''${2:-}" in
-                llvm) echo "${pkgs.llvmPackages.llvm}" ;;
+                llvm) echo "${llvmHost}" ;;
                 spirv-llvm-translator) echo "${pkgs.spirv-llvm-translator}" ;;
                 libxcb) echo "${pkgs.libxcb.dev}" ;;
                 libxrandr) echo "${pkgs.libxrandr.dev}" ;;
@@ -144,7 +190,10 @@
               pkgs.curl
               pkgs.git
               pkgs.coreutils
+              pkgs.glslang
+              pkgs.spirv-tools
             ];
+            MESA_HOST_PKG_CONFIG_PATH = mesaHostPkgConfigPath;
             shellHook = ''
               # The script drives Apple SDKs (iphoneos/xros/...) via xcrun; nix's
               # darwin stdenv points DEVELOPER_DIR/SDKROOT at the nix macOS SDK
