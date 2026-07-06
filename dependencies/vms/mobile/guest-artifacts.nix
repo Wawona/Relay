@@ -45,6 +45,7 @@ pkgs.runCommand "wawona-mobile-guest-artifacts" {
     ls ${kernel} >&2
     exit 1
   fi
-  cp ${makeDiskImage}/nixos.raw $out/rootfs.img
+  # make-disk-image names the raw image "<baseName>.img" (default nixos.img).
+  cp ${makeDiskImage}/*.img $out/rootfs.img
   echo "kernel + rootfs.img for wawona-mobile-guest" > $out/README
 ''
