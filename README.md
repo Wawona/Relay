@@ -13,10 +13,11 @@ per target, the engine that boots them. The guest's Wayland session is forwarded
 into Wawona over **vsock + waypipe** (no RDP, no emulated framebuffer for the GUI
 path).
 
-> **Status: SKELETON.** This repo currently provides the flake + `registryFragment`
-> skeleton, this port plan, and `COMPLIANCE.md`. Build stubs
-> (`dependencies/vms/stub.nix`) intentionally fail with a clear message. Real
-> per-target engines are downstream.
+> **Status: SKELETON.** Mode A (store jitless) and Mode B (JIT / Sileo IPA) must
+> both be designed in-tree — see [`docs/MODE-A-B.md`](docs/MODE-A-B.md). This repo
+> currently provides the flake + `registryFragment` skeleton, port plan, and
+> `COMPLIANCE.md`. Build stubs intentionally fail with a clear message until
+> engines land.
 
 ## Engine per target
 

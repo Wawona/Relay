@@ -1,28 +1,23 @@
 # wwn-vms App Store / platform compliance
 
-Honest, per-target posture for shipping a VM engine. These are constraints we
-respect, not obstacles we route around.
+Honest, per-target posture. Full Mode A/B plan: [`docs/MODE-A-B.md`](./docs/MODE-A-B.md)
+and [Wawona `mode-a-b.md`](https://github.com/Wawona/Wawona/blob/development/docs/mode-a-b.md).
 
-| Target | VM support | Engine | Store posture |
+| Target | Mode A (store-shaped) | Mode B (privileged) | Notes |
 | --- | --- | --- | --- |
-| macOS (direct/notarized) | Yes | Virtualization.framework (microvm.nix + vfkit) + `wawona-vz` | Direct/notarized channel only. Needs `com.apple.security.virtualization`. |
-| macOS (Mac App Store) | **Hidden** | - | MAS sandbox forbids spawning VMs; feature not exposed in MAS builds. |
-| iOS | Yes | jitless QEMU-TCTI (UTM SE model) | Allowed: no JIT, no `Hypervisor.framework`, guest ships as bundled/ODR **data** (no downloaded executables). Precedent: UTM SE. |
-| iPadOS | Yes | jitless QEMU-TCTI | Same as iOS. |
-| visionOS | Yes | jitless QEMU-TCTI (shared iOS path) | Same as iOS. |
-| tvOS | Limited | jitless QEMU-TCTI, minimal NixOS | Tight RAM ceiling; may degrade to OCI-management-only. |
-| watchOS | **No** | - | Infeasible. wwn-vms exposes nothing here; container image management (if any) is `wwn-containers`. |
-| Android | Yes | QEMU (TCG/JIT) + opportunistic KVM/AVF | JIT permitted on Android; Play-Store compliant. |
+| macOS (direct/notarized) | Virtualization.framework | Same + desktop-host SIP paths | Needs `com.apple.security.virtualization`. |
+| macOS (Mac App Store) | **No VM run** | N/A in MAS | Image/docs only if ever exposed. |
+| iOS / iPadOS | **jitless** QEMU-TCTI (UTM-SE model) | **JIT** UTM/QEMU in **Sileo Mode B IPA** only | Never link JIT into App Store IPA. |
+| visionOS | **Forbidden** (product) | **Forbidden** | Native + remote only. |
+| tvOS | **Forbidden** | **Forbidden** | Native + remote only. |
+| watchOS | **No** | **No** | Infeasible. |
+| Android | QEMU TCG (Play-safe) | Root/KVM paths optional | JIT OK on Android Play for QEMU. |
 
 ## Hard rules
 
-- **NixOS-only guest.** The built-in VM boots prebuilt NixOS images only.
-- **No JIT on Apple targets.** iOS/iPadOS/tvOS/visionOS use TCTI (translate-and-cache
-  ahead of execution), never runtime JIT. This is the App Store ceiling and is
-  not bypassed.
-- **Guests are data.** Guest kernels/rootfs are bundled resources or On-Demand
-  Resources - never downloaded executable code - on Apple targets.
-- **MAS ships without VMs.** Anything requiring VM spawning is absent from Mac
-  App Store builds.
-- **GUI over waypipe + vsock**, not an emulated GPU/framebuffer, so the guest's
-  Wayland session renders through Wawona.
+- **Design Mode A and Mode B together**; ship only A to App Store.
+- **No JIT on Apple Mode A.** TCTI only in store IPA.
+- **Mode B IPA** is a separate artifact from `repo.wawona.io` automation.
+- **Guests are data** on Apple Mode A (bundled/ODR) — no downloaded Mach-O.
+- **GUI over waypipe + vsock**, not emulated GPU/framebuffer for the primary path.
+- **visionOS/tvOS/watchOS:** no VM machine kind (Wawona product policy).
