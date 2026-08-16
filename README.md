@@ -1,5 +1,8 @@
 # wwn-vms
 
+[![CI](https://github.com/Wawona/wwn-vms/actions/workflows/ci.yml/badge.svg)](https://github.com/Wawona/wwn-vms/actions/workflows/ci.yml)
+[![Guest artifacts](https://github.com/Wawona/wwn-vms/actions/workflows/guest-artifacts.yml/badge.svg)](https://github.com/Wawona/wwn-vms/actions/workflows/guest-artifacts.yml)
+
 Wawona's **virtual-machine substrate**, split out of the Wawona repo so VM
 support is developed, versioned, and CI'd independently and consumed by Wawona as
 a flake input (like `wwn-weston`/`wwn-iland`/`wwn-waypipe`). Aligns with
