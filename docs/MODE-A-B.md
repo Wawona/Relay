@@ -11,7 +11,7 @@ Mode A vs Mode B on the iOS family:
 | Platform | Mode A engine | Mode B / privileged |
 |----------|---------------|---------------------|
 | **macOS** | `Virtualization.framework` (not MAS) | Same + SIP desktop-host paths |
-| **iOS / iPadOS** | UTM-SE–class **jitless** QEMU-TCTI | **JIT** UTM in Sileo Mode B IPA |
+| **iOS / iPadOS / visionOS** | UTM-SE-class **jitless** QEMU-TCTI | **JIT** UTM in Sileo Mode B IPA |
 | **Android** | QEMU TCG (± AVF/KVM when available) | Root/privileged paths as designed |
 | **Linux** | Host/QEMU profiles (TBD) | N/A |
 
@@ -53,7 +53,7 @@ or Wasm packages on it.
 
 - Ship Mode B engine inside App Store IPA “behind a toggle.”
 - Pretend jitless and JIT are the same binary with an env var.
-- Enable VM machine kind on tvOS/watchOS/visionOS (forbidden).
+- Enable VM machine kind on tvOS/watchOS (forbidden).
 
 ## Phases
 

@@ -12,12 +12,13 @@ Desktop/LockScreen, not Swinging Bridge.
 
 | | Mode A (store) | Mode B |
 |---|---|---|
-| iOS / iPadOS | UTM-SE–class **jitless** interpreter | UTM/QEMU **+ JIT** (Mode B IPA only) |
+| iOS / iPadOS | UTM-SE-class **jitless** interpreter | UTM/QEMU **+ JIT** (Mode B IPA only) |
+| visionOS | UTM-SE-class **jitless** interpreter | UTM/QEMU **+ JIT** (Mode B IPA only) |
 | macOS | Virtualization.framework paths as designed | SIP/desktop-host privileges as designed |
 | Android | Play-safe engine | Root/privileged outside Play |
 
 - **Never** link JIT Mode B into App Store / Play artifacts.
-- tvOS / watchOS / visionOS: VM kinds **forbidden** (policy).
+- tvOS / watchOS: VM kinds **forbidden** (policy).
 - Per-OS backends differ — do not force one QEMU/UTM stack onto every host.
 - Leave active Apple Container work in `wwn-containers` alone unless asked.
 
