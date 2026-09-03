@@ -9,6 +9,8 @@
 
 let
   cargoTarget = if simulator then "aarch64-apple-ios-sim" else "aarch64-apple-ios";
+  linkerTarget =
+    if simulator then "arm64-apple-ios17.0-simulator" else "arm64-apple-ios17.0";
   rustToolchain = pkgs.rust-bin.stable.latest.default.override {
     targets = [ cargoTarget ];
   };
@@ -30,7 +32,7 @@ rustPlatform.buildRustPackage {
     export NIX_CFLAGS_COMPILE=""
     export NIX_CXXFLAGS_COMPILE=""
     export NIX_LDFLAGS=""
-    export RUSTFLAGS="-C linker=$XCODE_CLANG -C link-arg=-isysroot -C link-arg=$SDKROOT -C link-arg=$APPLE_DEPLOYMENT_FLAG $RUSTFLAGS"
+    export RUSTFLAGS="-C linker=$XCODE_CLANG -C link-arg=-target -C link-arg=${linkerTarget} -C link-arg=-isysroot -C link-arg=$SDKROOT -C link-arg=$APPLE_DEPLOYMENT_FLAG $RUSTFLAGS"
     export CARGO_TARGET_${lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] cargoTarget)}_LINKER="$XCODE_CLANG"
   '';
 
