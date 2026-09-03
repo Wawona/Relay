@@ -16,7 +16,13 @@
 let
   sysrootEnv = builtins.getEnv "WAWONA_UTM_SYSROOT";
   sysrootCandidate =
-    if sysrootEnv != "" && builtins.pathExists sysrootEnv then sysrootEnv else null;
+    if sysrootEnv != "" && builtins.pathExists sysrootEnv then
+      builtins.path {
+        path = sysrootEnv;
+        name = "wawona-utm-sysroot-${platform}-${arch}";
+      }
+    else
+      null;
   scheme =
     if platform == "ios-tci" then "iOS-TCI"
     else if platform == "ios" then "iOS"
