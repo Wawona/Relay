@@ -33,26 +33,42 @@ else if !lib.hasPrefix "aarch64-darwin" system
   throw ''
     wwn-vms mobile engine pack (${platform}/${arch}) must be built on Darwin
     (needs Xcode + Metal toolchain). On macOS:
-      nix develop ${self}#utm-engine -c /bin/sh ${utm.buildDependenciesScript} -p ${platform} -a ${arch}
+      nix develop ${self}#utm-engine -c /bin/sh ${utm.dir}/scripts/build_dependencies.sh -p ${platform} -a ${arch}
     then:
       WAWONA_UTM_SYSROOT=$PWD/${expectedName} nix build .#packages.$(nix config show --json | jq -r .'"system"').wwn-vms-mobile-engine-${platform}
   ''
 else
   pkgs.runCommand "wwn-vms-mobile-engine-${platform}-${arch}" {
-    nativeBuildInputs = [ pkgs.nix pkgs.coreutils pkgs.cacert ];
-    __impureHostDeps = [
-      "/Applications/Xcode.app"
-      "/Library/Developer"
-      "/usr"
-      "/bin"
-      "/private/tmp"
-      "/private/var"
+    nativeBuildInputs = [
+      pkgs.nix
+      pkgs.coreutils
+      pkgs.cacert
+      pkgs.meson
+      pkgs.ninja
+      pkgs.cmake
+      pkgs.bison
+      pkgs.pkg-config
+      pkgs.gettext
+      pkgs.nasm
+      pkgs.curl
+      pkgs.git
+      pkgs.glslang
+      pkgs.spirv-tools
     ];
+    __noChroot = true;
   } ''
     export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
     work=$(mktemp -d)
+    export HOME="$work/home"
+    export XDG_CACHE_HOME="$work/cache"
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+    mkdir -p "$HOME" "$XDG_CACHE_HOME"
     cd "$work"
-    ${pkgs.nix}/bin/nix develop ${self}#utm-engine -c /bin/sh ${utm.buildDependenciesScript} -p ${platform} -a ${arch}
+    ${pkgs.nix}/bin/nix develop \
+      --keep-env-var HOME \
+      --keep-env-var XDG_CACHE_HOME \
+      ${self}#utm-engine \
+      -c /bin/sh ${utm.dir}/scripts/build_dependencies.sh -p ${platform} -a ${arch}
     test -d ${expectedName} || { echo "expected ${expectedName} after build" >&2; exit 1; }
     cp -a ${expectedName} $out
   ''

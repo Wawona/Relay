@@ -124,6 +124,8 @@
             distlib
             mako
             packaging
+            sphinx
+            sphinx-rtd-theme
           ]);
           # mesa's host mesa-clc build expects a Homebrew-style llvm prefix that
           # contains llvm-config AND clang; combine the nix outputs.
