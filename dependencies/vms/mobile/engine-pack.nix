@@ -65,8 +65,10 @@ else
     mkdir -p "$HOME" "$XDG_CACHE_HOME"
     cd "$work"
     ${pkgs.nix}/bin/nix develop \
+      --ignore-env \
       --keep-env-var HOME \
       --keep-env-var XDG_CACHE_HOME \
+      --keep-env-var PATH \
       ${self}#utm-engine \
       -c /bin/sh ${utm.dir}/scripts/build_dependencies.sh -p ${platform} -a ${arch}
     test -d ${expectedName} || { echo "expected ${expectedName} after build" >&2; exit 1; }
