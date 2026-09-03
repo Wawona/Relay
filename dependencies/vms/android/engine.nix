@@ -1,38 +1,79 @@
-# Android VM engine for wwn-vms.
+# Android VM engine: QEMU with Android hypervisor (KVM) when `/dev/kvm` exists,
+# otherwise TCG + JIT (Play-permitted).
 #
-# Android permits JIT, so unlike iOS this engine is NOT limited to TCTI:
-#   * QEMU with TCG + JIT (fast software emulation), and
-#   * opportunistic acceleration via the Android Virtualization Framework (AVF)
-#     / KVM where the device+ROM expose it (Pixel 6+, GrapheneOS, etc.).
-# Play-Store compliant (JIT is allowed on Android).
-#
-# The QEMU sources are the VENDORED UTM patchset in ../utm (same emulator as
-# the Apple mobile path, built with JIT enabled for Android) cross-compiled
-# through `wwn-toolchain`'s Android NDK toolchain. The guest is the same
-# bundled minimal NixOS aarch64 image (../mobile/guest.nix).
+# Accel selection is shared with crates/wwn-vms-engine (`AndroidHv` vs `TcgJit`).
+# The QEMU binary/shared object is built from vendored UTM sources (../utm)
+# via the NDK; until that cross-build lands this package ships the probe +
+# launch wrapper and documents the JNI contract Wawona implements.
 {
   pkgs,
   lib ? pkgs.lib,
-  # "qemu-jit" (portable, always available) or "avf" (needs device support).
-  accel ? "qemu-jit",
-  # Vendored UTM engine paths (wwn-vms `lib.utm` from the flake).
+  accel ? "auto",
   utm ? {
     dir = ../utm;
     qemuUtmPatch = ../utm/patches/qemu-10.0.2-utm.patch;
-    buildDependenciesScript = ../utm/scripts/build_dependencies.sh;
   },
 }:
 
 assert builtins.pathExists utm.qemuUtmPatch;
 
-pkgs.writeTextDir "README" ''
-  wwn-vms Android engine (${accel}): vendored UTM QEMU + mobile NixOS guest.
+let
+  launcher = pkgs.writeShellScriptBin "wawona-qemu-android" ''
+    set -euo pipefail
+    guest_dir="''${1:-}"
+    memory_mb="''${2:-768}"
+    qemu_bin="''${WAWONA_QEMU:-qemu-system-aarch64}"
+    if [ -z "$guest_dir" ] || [ ! -d "$guest_dir" ]; then
+      echo "usage: wawona-qemu-android GUEST_DIR [MEMORY_MB]" >&2
+      exit 2
+    fi
+    rootfs="$guest_dir/rootfs.img"
+    kernel=""
+    for name in Image zImage vmlinuz vmlinux; do
+      [ -f "$guest_dir/$name" ] && kernel="$guest_dir/$name" && break
+    done
+    if [ ! -f "$rootfs" ] || [ -z "$kernel" ]; then
+      echo "guest incomplete under $guest_dir" >&2
+      exit 1
+    fi
+    if [ -e /dev/kvm ]; then
+      accel=kvm
+      echo "[wawona-qemu-android] using Android hypervisor (/dev/kvm)" >&2
+    else
+      accel=tcg
+      echo "[wawona-qemu-android] no /dev/kvm; TCG+JIT fallback" >&2
+    fi
+    if command -v wawona-vm-launch >/dev/null 2>&1; then
+      exec wawona-vm-launch --guest-dir "$guest_dir" --memory "$memory_mb"
+    fi
+    exec "$qemu_bin" \
+      -machine "virt,accel=$accel" \
+      -cpu max \
+      -m "$memory_mb" \
+      -kernel "$kernel" \
+      -drive "file=$rootfs,if=virtio,format=raw" \
+      -device virtio-rng-pci \
+      -nographic \
+      -no-reboot
+  '';
+in
+pkgs.symlinkJoin {
+  name = "wwn-vms-android-qemu-hv";
+  paths = [ launcher ];
+  postBuild = ''
+    mkdir -p $out/share/wwn-vms
+    cat > $out/share/wwn-vms/README <<EOF
+    wwn-vms Android engine (${accel}): QEMU + KVM when /dev/kvm exists, else TCG+JIT.
 
-  Status: registry anchor only — cross-build through wwn-toolchain NDK is next.
-  Guest: wwn-vms/dependencies/vms/mobile/guest.nix
-  Sources: ${toString utm.dir}
+    Wawona JNI: nativeLaunchMobileVm probes /dev/kvm, then posix_spawns
+    libqemu-system-aarch64.so (or qemu-system-aarch64) with matching -accel.
 
-  Wawona integration: MainActivity.kt VM lane → JNI loader for libqemu + guest
-  artifacts (same kernel/rootfs.img as iOS). AVF/KVM used opportunistically;
-  QEMU-JIT is the portable fallback.
-''
+    UTM sources: ${toString utm.dir}
+    Guest: ../mobile/guest.nix
+    EOF
+  '';
+  meta = {
+    description = "Wawona Android VM engine (QEMU + KVM/TCG)";
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
+  };
+}

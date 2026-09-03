@@ -1,5 +1,5 @@
 {
-  description = "wwn-vms: Wawona's virtual-machine substrate. NixOS-only built-in guest, one engine per target: Virtualization.framework (microvm.nix + vfkit) on macOS; jitless QEMU-TCTI (UTM SE model) on iOS/iPadOS/tvOS/visionOS; QEMU/AVF on Android. SKELETON - real per-target engines are downstream (see README.md, COMPLIANCE.md).";
+  description = "wwn-vms: Wawona virtual-machine substrate. NixOS-only built-in guest. Engines: QEMU+HVF (Hypervisor.framework) on macOS; jitless QEMU-TCTI (UTM SE) on iOS/iPadOS/tvOS/visionOS; QEMU+Android HV (KVM) with TCG+JIT fallback on Android.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -38,13 +38,15 @@
       #
       #   nixos-vm     the NixOS-only built-in VM (the whole point of wwn-vms)
       #   vm-engine    the per-target hypervisor/emulator backend
+      # L3' VM-owned registry entries. Cited:
+      # Wawona/docs/wwn-repo-dag.md (registry merges only upward into Wawona).
       registryFragment = {
         nixos-vm = withPlatformVariants {
           macos = dir + "/microvm-guest.nix";
           ios = dir + "/mobile/guest.nix";
           ipados = dir + "/mobile/guest.nix";
-          tvos = dir + "/mobile/guest.nix";
-          visionos = dir + "/mobile/guest.nix";
+          tvos = dir + "/stub.nix";
+          visionos = dir + "/stub.nix";
           watchos = dir + "/stub.nix";
           android = dir + "/mobile/guest.nix";
           wearos = dir + "/stub.nix";
@@ -53,16 +55,28 @@
           macos = dir + "/macos/engine.nix";
           ios = dir + "/mobile/engine.nix";
           ipados = dir + "/mobile/engine.nix";
-          tvos = dir + "/mobile/engine.nix";
-          visionos = dir + "/mobile/engine.nix";
+          tvos = dir + "/stub.nix";
+          visionos = dir + "/stub.nix";
           watchos = dir + "/watchos/engine.nix";
           android = dir + "/android/engine.nix";
           wearos = dir + "/wearos/engine.nix";
         };
+        vm-engine-contract = withPlatformVariants {
+          ios = dir + "/mobile/engine-contract.nix";
+          ipados = dir + "/mobile/engine-contract.nix";
+        };
+        vm-engine-contract-modeb = withPlatformVariants {
+          ios = dir + "/mobile/engine-contract-modeb.nix";
+          ipados = dir + "/mobile/engine-contract-modeb.nix";
+        };
+        vm-engine-jit = withPlatformVariants {
+          ios = dir + "/mobile/engine-jit.nix";
+          ipados = dir + "/mobile/engine-jit.nix";
+        };
       };
 
       # Vendored UTM engine sources (QEMU-TCTI patches + build machinery + VZ
-      # reference backends) — formerly the separate `wwn-utm` repo, now folded
+      # reference backends). Formerly the separate `wwn-utm` repo, now folded
       # in-repo so wwn-vms is self-contained (see dependencies/vms/utm/README.md).
       # mobile/engine.nix + android/engine.nix consume these paths via their
       # `utm` argument.
@@ -197,7 +211,7 @@
             shellHook = ''
               # The script drives Apple SDKs (iphoneos/xros/...) via xcrun; nix's
               # darwin stdenv points DEVELOPER_DIR/SDKROOT at the nix macOS SDK
-              # which has no mobile SDKs — restore the host Xcode toolchain.
+              # which has no mobile SDKs. Restore the host Xcode toolchain.
               unset CC CXX LD AR NM RANLIB STRIP CPP OBJCC SDKROOT
               # xcode-select echoes $DEVELOPER_DIR back, so query with it cleared.
               export DEVELOPER_DIR="$(env -u DEVELOPER_DIR /usr/bin/xcode-select --print-path)"
@@ -231,11 +245,23 @@
           utm = self.lib.utm;
           mobileGuest = self.nixosConfigurations.wawona-mobile-guest;
         in
-        lib.optionalAttrs (lib.hasSuffix "-darwin" system) {
+        {
+          wwn-vms-macos-engine = pkgs.callPackage ./dependencies/vms/macos/engine.nix { };
+          wwn-vms-android-engine = pkgs.callPackage ./dependencies/vms/android/engine.nix {
+            inherit utm;
+          };
+        }
+        // lib.optionalAttrs (lib.hasSuffix "-darwin" system) {
           wwn-vms-mobile-engine-ios-tci = pkgs.callPackage ./dependencies/vms/mobile/engine.nix {
             inherit utm;
             self = self;
             applePlatform = "ios-tci";
+            arch = "arm64";
+          };
+          wwn-vms-mobile-engine-ios-jit = pkgs.callPackage ./dependencies/vms/mobile/engine.nix {
+            inherit utm;
+            self = self;
+            applePlatform = "ios";
             arch = "arm64";
           };
         }

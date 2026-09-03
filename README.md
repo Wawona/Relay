@@ -13,76 +13,43 @@ per target, the engine that boots them. The guest's Wayland session is forwarded
 into Wawona over **vsock + waypipe** (no RDP, no emulated framebuffer for the GUI
 path).
 
-> **Status: SKELETON.** Mode A (store jitless) and Mode B (JIT / Sileo IPA) must
-> both be designed in-tree — see [`docs/MODE-A-B.md`](docs/MODE-A-B.md). This repo
-> currently provides the flake + `registryFragment` skeleton, port plan, and
-> `COMPLIANCE.md`. Build stubs intentionally fail with a clear message until
-> engines land.
-
 ## Engine per target
 
-- **macOS** (direct/notarized, non-MAS): Virtualization.framework via
-  [microvm.nix](https://github.com/microvm-nix/microvm.nix) + vfkit, plus the
-  native `wawona-vz` Swift launcher. `writableStoreOverlay` + virtiofs ro-store
-  guest (no `make-disk-image`/KVM). Rosetta for x86_64 guests. Requires the
-  `com.apple.security.virtualization` entitlement; not Mac App Store viable.
-- **iOS / iPadOS**: jitless **QEMU-TCTI** (UTM SE model) from the **vendored
-  UTM engine sources in-repo** (`dependencies/vms/utm/`). No
-  `Hypervisor.framework` on iOS, so TCTI is the ceiling; App-Store-approved
-  precedent (UTM SE). NixOS `aarch64-linux` guest shipped as bundled / On-Demand
-  Resources data - never downloaded executable code.
-- **visionOS**: shares the iOS QEMU-TCTI path.
-- **tvOS**: QEMU-TCTI with a minimal NixOS profile (tight RAM ceiling); may be
-  management-only where a guest won't fit.
-- **watchOS**: no VM (infeasible). See `COMPLIANCE.md`.
-- **Android**: QEMU (TCG; JIT permitted on Android so faster than iOS) with
-  opportunistic KVM / Android Virtualization Framework where a device exposes it.
+| Host | Engine |
+|---|---|
+| **macOS** | **QEMU + HVF** (`Hypervisor.framework` via `-accel hvf`). Launcher: `wawona-qemu-hvf` / Rust `wawona-vm-launch`. |
+| **iOS / iPadOS** | jitless **QEMU-TCTI** (UTM SE) from vendored `dependencies/vms/utm/`. Mode B IPA may enable JIT. |
+| **visionOS / tvOS / watchOS** | VM machine kind forbidden by product policy. |
+| **Android** | **QEMU + Android hypervisor** (`/dev/kvm` → `-accel kvm`) with **TCG+JIT** fallback. |
+| **Linux** | QEMU + KVM where available. |
+
+Legacy developer lane on macOS: Virtualization.framework via microvm.nix + vfkit
+(`microvm-guest.nix`, `vz-launcher.nix`). Machines Start uses QEMU+HVF.
+
+### Rust engine crate
+
+`crates/wwn-vms-engine` selects accel and builds QEMU argv (C ABI for ObjC/JNI):
+
+```text
+wwn_vm_preferred_accel / wwn_vm_build_argv_json / wawona-vm-launch
+```
 
 ### Making it fast on iOS
 
-Honest ceiling is TCTI (no acceleration for store apps). Documented levers:
-lightest NixOS profile, GUI over waypipe+vsock (not emulated GPU/framebuffer),
-QEMU TCG tuning, warmed translation blocks. No JIT is attempted (App Store rule).
+Honest ceiling is TCTI (no acceleration for store apps). Lightest NixOS profile,
+GUI over waypipe+vsock, QEMU TCG tuning. No JIT in Mode A.
 
-## Mobile engine (iOS / iPadOS / visionOS / tvOS)
+## Packages
 
-- `dependencies/vms/mobile/guest.nix` - a bundled minimal NixOS aarch64-linux
-  guest (headless cage + foot, waypipe over vsock, `pixman` software rendering,
-  trimmed closure for the mobile RAM ceiling). Exposed as
-  `nixosConfigurations.wawona-mobile-guest`; kernel/rootfs build on the
-  aarch64-linux builder and ship as bundled / On-Demand-Resource **data**.
-- `dependencies/vms/mobile/engine.nix` - the jitless **QEMU-TCTI** engine recipe.
-  Built from the **vendored UTM sources** at `dependencies/vms/utm/` (exposed as
-  `wwn-vms.lib.utm`: `qemuUtmPatch`, the dependency build scripts, reference
-  backends, and the UTM SE Xcode scheme — see `dependencies/vms/utm/README.md`
-  for provenance). The former separate `wwn-utm` repo/flake-input is gone; the
-  engine unit lives in-repo. The recipe cross-compiles through `wwn-toolchain`;
-  it still throws with precise next-steps until the full cross-build lands.
-  TCTI is the honest ceiling (no Hypervisor.framework on iOS).
-
-## Android engine
-
-`dependencies/vms/android/engine.nix` - QEMU with **TCG + JIT** (JIT is allowed
-on Android, so this beats the iOS TCTI ceiling) plus opportunistic AVF/KVM where
-the device exposes it. Cross-compiled from the vendored UTM sources
-(`dependencies/vms/utm/`) through `wwn-toolchain`'s Android NDK toolchain; boots
-the same `mobile/guest.nix`. Play-Store compliant.
-
-## Port plan
-
-1. Consume `wwn-toolchain` cross toolchains (`buildForIOS`, `buildForMacOS`,
-   `buildForAndroid`) and merge `registryFragment` into Wawona.
-2. Relocate the working macOS path here: `microvm-guest.nix`, `vz-launcher.nix`,
-   `WawonaLinuxVZ.swift` (from Wawona), keep flake apps `wawona-microvm` /
-   `wawona-vm-bridge`.
-3. Bring up the QEMU-TCTI engine from the vendored UTM sources
-   (`dependencies/vms/utm/`) for iOS/iPadOS/visionOS/tvOS with bundled minimal
-   NixOS guests.
-4. Android engine (QEMU/AVF).
-5. Replace `dependencies/vms/stub.nix` with per-platform derivations; expose
-   `nixos-vm-{macos,ios,android,...}` and `vm-engine-*` packages.
+```bash
+nix build .#wwn-vms-macos-engine
+nix build .#wwn-vms-android-engine
+# Darwin + Xcode (impure):
+nix build .#wwn-vms-mobile-engine-ios-tci
+nix eval .#lib.capabilities
+```
 
 ## Convention
 
 Follows the [wwn-* porting convention](https://github.com/Wawona/Wawona/blob/main/docs/2026-wwn-porting-convention.md).
-See also Wawona `docs/2026-nixos-vm-bridge.md`.
+See `docs/MODE-A-B.md`, `COMPLIANCE.md`.

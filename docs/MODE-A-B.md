@@ -1,7 +1,8 @@
-# wwn-vms — Mode A / Mode B implementation plan
+# wwn-vms: Mode A / Mode B implementation plan
 
 Canonical product split: [Wawona `docs/mode-a-b.md`](https://github.com/Wawona/Wawona/blob/development/docs/mode-a-b.md).
-Mirror: keep this file in sync with `Wawona/docs/vms-mode-a-b.md`.
+iOS channels: [wawona-ios-mode-b-channels](https://github.com/Wawona/Wawona/blob/development/docs/agent-rules/wawona-ios-mode-b-channels.md).
+Mirror: keep in sync with `Wawona/docs/vms-mode-a-b.md`.
 
 ## Goal
 
@@ -10,17 +11,24 @@ Mode A vs Mode B on the iOS family:
 
 | Platform | Mode A engine | Mode B / privileged |
 |----------|---------------|---------------------|
-| **macOS** | `Virtualization.framework` (not MAS) | Same + SIP desktop-host paths |
-| **iOS / iPadOS / visionOS** | UTM-SE-class **jitless** QEMU-TCTI | **JIT** UTM in Sileo Mode B IPA |
-| **Android** | QEMU TCG (± AVF/KVM when available) | Root/privileged paths as designed |
+| **macOS** | **QEMU + HVF** (`Hypervisor.framework`) | Same (macOS not App Store constrained) |
+| **iOS / iPadOS** | UTM-SE-class **jitless** QEMU-TCTI | **JIT** UTM/QEMU via **TrollStore** and/or **Sileo** Mode B IPA |
+| **tvOS / watchOS / visionOS** | VM machine kind forbidden | VM machine kind forbidden |
+| **Android** | QEMU + KVM when `/dev/kvm` exists, else TCG+JIT | Root/privileged paths as designed |
 | **Linux** | Host/QEMU profiles (TBD) | N/A |
+
+### iOS QEMU: interpreter vs JIT
+
+```text
+App Store / TestFlight  →  -accel tcg / TCTI (UTM SE). Interpreter ceiling. No MAP_JIT.
+TrollStore sideload     →  Mode B IPA with JIT (VMs + containers share engine).
+Sileo (jailbreak)       →  Same JIT + Desktop / LockScreen / Swinging Bridge product.
+```
 
 Shared: Machines schema, guest artifacts, vsock + waypipe GUI, capability gates.
 **Do not** assume the iOS interpreter path on macOS/Android or vice versa.
 
-Containers are separate (`wwn-containers`): macOS Apple Containerization work is
-in flight elsewhere — Wawona integration waits on that merge; do not block VMs
-or Wasm packages on it.
+Containers are separate (`wwn-containers`).
 
 ## Shared substrate (both modes)
 
@@ -28,44 +36,31 @@ or Wasm packages on it.
 - Guest image selection / NixOS guest artifacts (data)
 - vsock + waypipe GUI path into Wawona
 - Capability gate API: `VmEngineKind = .interpreterJitless | .jitEnabled`
-- Unit tests against the interface, not a single binary
+- `crates/wwn-vms-engine`: `AccelKind::Tcti` vs `AccelKind::TcgJit`
 
 ## Mode A implementation
 
-1. Link / embed only TCTI (UTM-SE model) sources from `dependencies/vms/utm/`
-   paths used for store builds.
-2. CI: assert **no** JIT entitlements, no `MAP_JIT`, no Hypervisor on iOS store
-   schemes; symbol/string scan for jailbreak/JIT engage UI = fail.
-3. Performance: document TCTI ceiling; tune guest size (existing README levers).
-4. Optional ODR/downloadable UTM-SE payload (see Wawona #33) — still jitless data.
+1. Embed only TCTI (UTM-SE) sources for store builds. Force `-accel tcg`.
+2. CI: no JIT entitlements / `MAP_JIT` / Hypervisor / TrollStore/Sileo strings in store schemes.
+3. Document TCTI ceiling; tune guest size.
+4. Optional ODR UTM-SE payload. Still jitless data.
 
 ## Mode B implementation
 
-1. Separate product flavor / scheme: `Wawona-iOS-ModeB` (name TBD) **not**
-   submitted to ASC.
-2. Enable JIT UTM path (same family as jailbreak UTM / TrollStore JIT).
-3. `repo.wawona.io` CI: build Mode B IPA → Sileo package automatically.
-4. Mode B may use unsandboxed shell alongside VMs (product Mode B shell); VM
-   engine must not be the only Mode B feature.
-5. Website documents JIT; store IPA never mentions it.
+1. Separate scheme `Wawona-iOS-ModeB` (name TBD). **Not** submitted to ASC.
+2. JIT UTM/QEMU path (TrollStore entitlement and/or jailbreak).
+3. `repo.wawona.io` auto Mode B IPA for Sileo.
+4. Website documents TrollStore (JIT) and Sileo (full Mode B). Store never mentions either.
 
 ## Never
 
-- Ship Mode B engine inside App Store IPA “behind a toggle.”
-- Pretend jitless and JIT are the same binary with an env var.
-- Enable VM machine kind on tvOS/watchOS (forbidden).
-
-## Phases
-
-| Phase | Work |
-|-------|------|
-| 1 | Engine interface + Mode A TCTI stub→real boot on device |
-| 2 | Mode B JIT engine behind Mode-B-only target |
-| 3 | repo.wawona.io auto Mode B IPA + Sileo metadata |
-| 4 | e2e: Mode A guest waypipe; Mode B JIT guest waypipe |
+- Mode B engine inside App Store IPA behind a toggle.
+- Jitless and JIT as one binary with an env var.
+- VM machine kind on tvOS/watchOS/visionOS.
+- Treating TrollStore as full Desktop/LockScreen/Swinging Bridge Mode B.
 
 ## Success
 
-- Store IPA boots a guest **without** JIT and passes App Store review notes.
-- Sileo Mode B IPA boots the same profile class **with** JIT.
-- Single Machines UI codepath; engine selected by build flavor / capability.
+- Store IPA boots without JIT and passes review.
+- TrollStore / Sileo Mode B IPA boots with JIT.
+- Single Machines UI; engine selected by build flavor.
