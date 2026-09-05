@@ -69,6 +69,12 @@ fastest implementation require a stated comparison set and reproducible evidence
   before fixing lower-layer whiteout ordering and symlink-parent confinement.
   All 16 existing OCI tests and five new layer tests passed; a 4 MiB layer
   application benchmark also passed output verification on macOS.
+- Pinned QEMU 11.0.1 TCI reference built locally after supplying the missing
+  libtasn1 dependency required by its TLS qtest compilation. HVF is disabled.
+  Three x86 guest runs each verified one million recurrence steps and exited
+  through the expected debug-exit status. Cold boot + computation times were
+  364,968,666 ns, 278,815,708 ns, and 271,010,125 ns. This is a reference guest
+  arithmetic test, not Linux/OCI execution or an iOS/UTM comparison.
 - Exploratory macOS arm64 recurrence benchmark (one million iterations,
   11 samples, simulator stopped, other compilation still active): median
   unfused 37,801,458 ns, fused 29,431,917 ns, native iterative 1,538,875 ns.
