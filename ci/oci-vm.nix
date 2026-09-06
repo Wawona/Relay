@@ -63,7 +63,7 @@ pkgs.testers.runNixOSTest {
     status, output = machine.execute("${runSuite}", timeout=2700)
     print(output)
     print("OCI_SUITE_ELAPSED_SECONDS=" + str(time.monotonic() - started))
-    machine.copy_from_vm("/root/oci-suite/logs", "oci-tap")
+    machine.copy_from_machine("/root/oci-suite/logs", "oci-tap")
     assert status == 0, "OCI runtime-tools conformance failed; inspect TAP logs"
   '';
 }
