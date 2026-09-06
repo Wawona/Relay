@@ -236,6 +236,22 @@ pub(super) fn compile(
                     src: *stack.last().ok_or_else(unsupported)?,
                 });
             }
+            Operator::Select
+            | Operator::TypedSelect {
+                ty: ValType::I64 | ValType::I32,
+            } => {
+                let condition = stack.pop().ok_or_else(unsupported)?;
+                let if_false = stack.pop().ok_or_else(unsupported)?;
+                let if_true = stack.pop().ok_or_else(unsupported)?;
+                let dst = fresh()?;
+                ops.push(Op::Select {
+                    dst,
+                    condition,
+                    if_true,
+                    if_false,
+                });
+                stack.push(dst);
+            }
             Operator::Drop => {
                 stack.pop().ok_or_else(unsupported)?;
             }

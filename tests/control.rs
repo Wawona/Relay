@@ -135,3 +135,25 @@ fn bit_counts_and_sign_extensions() {
         check(&[0x02, 0x7e, 0x20, 0, opcode, 0x0b, 0x0b], &cases);
     }
 }
+
+#[test]
+fn select_is_eager_and_preserves_stack_values() {
+    for selection in [vec![0x1b], vec![0x1c, 1, 0x7e]] {
+        let mut body = vec![0x20, 0, 0x20, 1, 0x20, 0, 0x50];
+        body.extend(selection);
+        body.push(0x0b);
+        check(&body, &[(0, 7, 0), (8, 7, 7)]);
+        let mut structured = vec![0x02, 0x7e];
+        structured.extend(&body);
+        structured.push(0x0b);
+        check(&structured, &[(0, 7, 0), (8, 7, 7)]);
+    }
+    // Both operands execute even when the trapping value would be unselected.
+    let f = Function::compile(
+        &module(&[0x42, 7, 0x42, 1, 0x42, 0, 0x7f, 0x41, 1, 0x1b, 0x0b]),
+        "run",
+        true,
+    )
+    .unwrap();
+    assert_eq!(f.run(&[0, 0], 100), Err(Error::DivisionByZero));
+}

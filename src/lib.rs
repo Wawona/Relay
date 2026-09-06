@@ -61,6 +61,12 @@ pub enum Op {
         dst: u16,
         src: u16,
     },
+    Select {
+        dst: u16,
+        condition: u16,
+        if_true: u16,
+        if_false: u16,
+    },
     Load64 {
         dst: u16,
         address: u16,
@@ -180,6 +186,12 @@ impl Program {
                 | Op::Mul { dst, lhs, rhs }
                 | Op::DivSigned { dst, lhs, rhs }
                 | Op::Int64 { dst, lhs, rhs, .. } => valid(dst) && valid(lhs) && valid(rhs),
+                Op::Select {
+                    dst,
+                    condition,
+                    if_true,
+                    if_false,
+                } => valid(dst) && valid(condition) && valid(if_true) && valid(if_false),
                 Op::Load64 { dst, address, .. } => valid(dst) && valid(address),
                 Op::Store64 { src, address, .. } => valid(src) && valid(address),
                 Op::JumpIf { condition, .. } => valid(condition),
@@ -304,6 +316,7 @@ fn handler_for(op: Op) -> Handler {
         Op::Unary64 { kind, .. } => integer::unary_handler(kind),
         Op::Eqz { .. } => eqz,
         Op::Trap => trap,
+        Op::Select { .. } => select,
         Op::Load64 { .. } => load,
         Op::Store64 { .. } => store,
         Op::Jump { .. } => jump,
@@ -430,4 +443,23 @@ fn ret(i: &Instruction, s: &mut State<'_>) -> Result<Control, Error> {
         return Ok(Control::Return(s.registers[src as usize]));
     }
     unreachable!()
+}
+
+fn select(i: &Instruction, s: &mut State<'_>) -> Result<Control, Error> {
+    s.charge()?;
+    if let Op::Select {
+        dst,
+        condition,
+        if_true,
+        if_false,
+    } = i.op
+    {
+        let src = if s.registers[condition as usize] != 0 {
+            if_true
+        } else {
+            if_false
+        };
+        s.registers[dst as usize] = s.registers[src as usize];
+    }
+    Ok(Control::Next(i.next))
 }
