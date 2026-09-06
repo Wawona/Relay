@@ -19,8 +19,10 @@ This is a target, not a measured result or an App Store approval claim.
 - Guarded affine-loop acceleration using modular exponentiation. Only pure,
   recognized loops qualify; guards retain the original bounded execution path.
 - Experimental pure i64 WASM function frontend using full module validation,
-  SSA locals, and stack elimination. Handles constants, locals, add, multiply,
-  signed division, drop, return, and end. Other features fail before execution.
+  SSA locals for straight-line code and explicit register merges for structured
+  control. Handles blocks, loops, if/else, branches, returns, integer arithmetic,
+  comparisons, shifts, rotations, bit counts, and sign extensions. Unsupported
+  features fail before execution; calls, memory, and WASI still use Pulley.
 - Differential fusion tests, memory/trap tests, concurrent invocation tests,
   real binary WASM tests, and a dispatch microbenchmark with raw samples.
 - Optional shared Pulley reference engine, fixed to bytecode translation.
@@ -57,8 +59,10 @@ It cannot substantiate a comparison with UTM, containers, or WASI.
 The intended dependency graph puts `wwn-runtime` below `wwn-wasm` and `wwn-vms`.
 `wwn-containers` consumes the VM engine for iOS OCI execution. Wawona integrates
 all three in Machines. No dependency points back from a runtime into Wawona.
-Only the local Cargo integration in wwn-wasm exists so far. Nix source wiring,
-QEMU integration, container integration, and Wawona app linking remain pending.
+Local Cargo and Nix source integration in wwn-wasm now build on macOS; the
+iOS Simulator CLI also compiles. QEMU integration, container integration, and
+Wawona app linking remain pending. UTM comparisons are deferred until runtime
+implementation and integration are ready.
 Native bundled Weston/Niri remain native and preserve upstream behavior.
 
 Runtime-created operands, branch metadata, optimized IR, and lookup tables must

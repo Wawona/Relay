@@ -10,7 +10,9 @@ pub mod wasm;
 #[cfg(feature = "wasmtime-baseline")]
 pub mod baseline;
 
+mod integer;
 mod optimize;
+pub use integer::{Int64, Unary64};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Optimization {
@@ -21,16 +23,65 @@ pub enum Optimization {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
-    Const { dst: u16, value: u64 },
-    Copy { dst: u16, src: u16 },
-    Add { dst: u16, lhs: u16, rhs: u16 },
-    Mul { dst: u16, lhs: u16, rhs: u16 },
-    DivSigned { dst: u16, lhs: u16, rhs: u16 },
-    Load64 { dst: u16, address: u16, offset: u64 },
-    Store64 { src: u16, address: u16, offset: u64 },
-    Jump { target: usize },
-    JumpIf { condition: u16, target: usize },
-    Return { src: u16 },
+    Const {
+        dst: u16,
+        value: u64,
+    },
+    Copy {
+        dst: u16,
+        src: u16,
+    },
+    Add {
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+    },
+    Mul {
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+    },
+    DivSigned {
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+    },
+    Int64 {
+        kind: Int64,
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+    },
+    Unary64 {
+        kind: Unary64,
+        dst: u16,
+        src: u16,
+    },
+    Eqz {
+        dst: u16,
+        src: u16,
+    },
+    Load64 {
+        dst: u16,
+        address: u16,
+        offset: u64,
+    },
+    Store64 {
+        src: u16,
+        address: u16,
+        offset: u64,
+    },
+    Jump {
+        target: usize,
+    },
+    JumpIf {
+        condition: u16,
+        target: usize,
+    },
+    Return {
+        src: u16,
+    },
+    Trap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +94,7 @@ pub enum Error {
     MemoryOutOfBounds,
     DivisionByZero,
     IntegerOverflow,
+    Unreachable,
 }
 
 impl std::fmt::Display for Error {
@@ -121,15 +173,18 @@ impl Program {
             let valid = |r: u16| (r as usize) < registers;
             let registers_ok = match *op {
                 Op::Const { dst, .. } => valid(dst),
-                Op::Copy { dst, src } => valid(dst) && valid(src),
+                Op::Copy { dst, src } | Op::Eqz { dst, src } | Op::Unary64 { dst, src, .. } => {
+                    valid(dst) && valid(src)
+                }
                 Op::Add { dst, lhs, rhs }
                 | Op::Mul { dst, lhs, rhs }
-                | Op::DivSigned { dst, lhs, rhs } => valid(dst) && valid(lhs) && valid(rhs),
+                | Op::DivSigned { dst, lhs, rhs }
+                | Op::Int64 { dst, lhs, rhs, .. } => valid(dst) && valid(lhs) && valid(rhs),
                 Op::Load64 { dst, address, .. } => valid(dst) && valid(address),
                 Op::Store64 { src, address, .. } => valid(src) && valid(address),
                 Op::JumpIf { condition, .. } => valid(condition),
                 Op::Return { src } => valid(src),
-                Op::Jump { .. } => true,
+                Op::Jump { .. } | Op::Trap => true,
             };
             if !registers_ok {
                 return Err(Error::InvalidRegister);
@@ -140,7 +195,8 @@ impl Program {
                 }
                 targets.insert(target);
             }
-            if pc + 1 == ops.len() && !matches!(op, Op::Return { .. } | Op::Jump { .. }) {
+            if pc + 1 == ops.len() && !matches!(op, Op::Return { .. } | Op::Jump { .. } | Op::Trap)
+            {
                 return Err(Error::InvalidProgram("fallthrough beyond program"));
             }
         }
@@ -244,12 +300,29 @@ fn handler_for(op: Op) -> Handler {
         Op::Add { .. } => add,
         Op::Mul { .. } => mul,
         Op::DivSigned { .. } => div_signed,
+        Op::Int64 { kind, .. } => integer::handler(kind),
+        Op::Unary64 { kind, .. } => integer::unary_handler(kind),
+        Op::Eqz { .. } => eqz,
+        Op::Trap => trap,
         Op::Load64 { .. } => load,
         Op::Store64 { .. } => store,
         Op::Jump { .. } => jump,
         Op::JumpIf { .. } => jump_if,
         Op::Return { .. } => ret,
     }
+}
+
+fn eqz(i: &Instruction, s: &mut State<'_>) -> Result<Control, Error> {
+    s.charge()?;
+    if let Op::Eqz { dst, src } = i.op {
+        s.registers[dst as usize] = u64::from(s.registers[src as usize] == 0);
+    }
+    Ok(Control::Next(i.next))
+}
+
+fn trap(_: &Instruction, s: &mut State<'_>) -> Result<Control, Error> {
+    s.charge()?;
+    Err(Error::Unreachable)
 }
 
 fn constant(i: &Instruction, s: &mut State<'_>) -> Result<Control, Error> {

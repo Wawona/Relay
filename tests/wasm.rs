@@ -48,7 +48,7 @@ fn invalid_modules_and_unsupported_features_do_not_execute() {
         assert!(Function::compile(&bytes[..end], "run", true).is_err());
     }
     assert!(Function::compile(&bytes, "missing", true).is_err());
-    // i64.clz is valid Wasm, but unsupported by this experimental frontend.
-    let unsupported = module(1, &[0x20, 0, 0x79, 0x0b]);
+    // f64.convert_i64_s followed by truncation is valid but unsupported.
+    let unsupported = module(1, &[0x20, 0, 0xb9, 0xb0, 0x0b]);
     assert!(Function::compile(&unsupported, "run", true).is_err());
 }

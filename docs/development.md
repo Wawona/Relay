@@ -103,9 +103,22 @@ fastest implementation require a stated comparison set and reproducible evidence
   value 36, one fused pair, host_os ios, host_arch aarch64. This proves simulator
   execution, not app integration or physical-device execution.
 
-Current priority is macOS correctness and demos before further iOS integration.
-Wasm integration currently uses a sibling Cargo path; Nix source packaging and
-lockfile propagation are unfinished. Do not build release claims from this tree.
+- Added structured control lowering and static integer handlers. Seven new tests
+  cover loops, if/else, branch results, function exits, dead code, fuel limits,
+  shifts, comparisons, remainders, bit counts, and sign extensions, with Pulley
+  differential checks. All 23 runtime tests and Clippy pass locally.
+- Local wwn-wasm Nix macOS package now builds with shared runtime source. Full
+  WASI CLI compiles for iOS Simulator. P1 and P2 Rust demo guests both executed
+  successfully there with their expected stdout and exit status zero. These
+  are standalone Simulator processes, not the integrated Wawona app.
+- First upstream CI run passes Linux runtime, both Apple target compilations,
+  and real QEMU TCI guest execution. OCI validation packaging failed because
+  upstream binaries live in validation/*/*.t; corrected that glob. The revised
+  VM derivation evaluates locally; Linux guest conformance remains unverified.
+
+Current priority is runtime implementation and Wawona app integration. UTM
+comparisons are deferred. Cross-repository source pins and publication access
+still need finalization. Do not build release claims from this tree.
 
 No UTM JIT comparison, full WASI integration, QEMU backend, OCI integration,
 physical-device execution of this engine, or App Store review has passed yet.

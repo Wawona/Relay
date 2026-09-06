@@ -2,6 +2,8 @@
 //! before execution; this module makes no WASI or full-WASM conformance claim.
 use crate::{Error, Op, Outcome, Program};
 use wasmparser::{ExternalKind, Operator, Parser, Payload, ValType, Validator};
+#[path = "wasm_control.rs"]
+mod control;
 
 pub struct Function {
     program: Program,
@@ -9,7 +11,7 @@ pub struct Function {
 }
 
 impl Function {
-    /// Validate the entire module, then lower one exported pure function to SSA
+    /// Validate the entire module, then lower one exported pure function to validated
     /// register data. No guest bytes ever become native instructions.
     pub fn compile(bytes: &[u8], export: &str, fusion: bool) -> Result<Self, Error> {
         if bytes.len() > 16 * 1024 * 1024 {
@@ -62,7 +64,7 @@ impl Function {
         let mut local_count = parameters;
         for local in body.get_locals_reader().map_err(|_| unsupported())? {
             let (count, ty) = local.map_err(|_| unsupported())?;
-            if ty != ValType::I64 {
+            if !matches!(ty, ValType::I64 | ValType::I32) {
                 return Err(unsupported());
             }
             local_count = local_count
@@ -74,6 +76,27 @@ impl Function {
         }
         if local_count > 65536 {
             return Err(unsupported());
+        }
+        let structured = body
+            .get_operators_reader()
+            .map_err(|_| unsupported())?
+            .into_iter()
+            .any(|op| {
+                matches!(
+                    op,
+                    Ok(Operator::Block { .. }
+                        | Operator::Loop { .. }
+                        | Operator::If { .. }
+                        | Operator::Br { .. }
+                        | Operator::BrIf { .. }
+                        | Operator::Unreachable)
+                )
+            });
+        if structured {
+            return Ok(Self {
+                program: control::compile(body, local_count, fusion)?,
+                parameters,
+            });
         }
         let mut locals: Vec<_> = (0..local_count).map(|v| v as u16).collect();
         let mut next_register = local_count;
@@ -99,6 +122,31 @@ impl Function {
                     ops.push(Op::Const {
                         dst,
                         value: value as u64,
+                    });
+                    stack.push(dst);
+                }
+                Operator::I32Const { value } => {
+                    let dst = fresh()?;
+                    ops.push(Op::Const {
+                        dst,
+                        value: value as u32 as u64,
+                    });
+                    stack.push(dst);
+                }
+                Operator::I64ExtendI32U | Operator::Nop => {}
+                Operator::I64Eqz | Operator::I32Eqz => {
+                    let src = stack.pop().ok_or_else(unsupported)?;
+                    let dst = fresh()?;
+                    ops.push(Op::Eqz { dst, src });
+                    stack.push(dst);
+                }
+                ref other if unary_kind(other).is_some() => {
+                    let src = stack.pop().ok_or_else(unsupported)?;
+                    let dst = fresh()?;
+                    ops.push(Op::Unary64 {
+                        kind: unary_kind(other).unwrap(),
+                        dst,
+                        src,
                     });
                     stack.push(dst);
                 }
@@ -129,7 +177,19 @@ impl Function {
                     });
                     finished = true;
                 }
-                _ => return Err(unsupported()),
+                other => {
+                    let kind = integer_kind(&other).ok_or_else(unsupported)?;
+                    let rhs = stack.pop().ok_or_else(unsupported)?;
+                    let lhs = stack.pop().ok_or_else(unsupported)?;
+                    let dst = fresh()?;
+                    ops.push(Op::Int64 {
+                        kind,
+                        dst,
+                        lhs,
+                        rhs,
+                    });
+                    stack.push(dst);
+                }
             }
             if ops.len() > 1_000_000 {
                 return Err(unsupported());
@@ -152,4 +212,46 @@ impl Function {
     pub fn fused_pairs(&self) -> usize {
         self.program.fused_pairs()
     }
+}
+
+fn integer_kind(op: &Operator<'_>) -> Option<crate::Int64> {
+    use crate::Int64::*;
+    Some(match op {
+        Operator::I64Sub => Sub,
+        Operator::I64And => And,
+        Operator::I64Or => Or,
+        Operator::I64Xor => Xor,
+        Operator::I64Shl => Shl,
+        Operator::I64ShrS => ShrS,
+        Operator::I64ShrU => ShrU,
+        Operator::I64Rotl => Rotl,
+        Operator::I64Rotr => Rotr,
+        Operator::I64Eq => Eq,
+        Operator::I64Ne => Ne,
+        Operator::I64LtS => LtS,
+        Operator::I64LtU => LtU,
+        Operator::I64GtS => GtS,
+        Operator::I64GtU => GtU,
+        Operator::I64LeS => LeS,
+        Operator::I64LeU => LeU,
+        Operator::I64GeS => GeS,
+        Operator::I64GeU => GeU,
+        Operator::I64DivU => DivU,
+        Operator::I64RemS => RemS,
+        Operator::I64RemU => RemU,
+        _ => return None,
+    })
+}
+
+fn unary_kind(op: &Operator<'_>) -> Option<crate::Unary64> {
+    use crate::Unary64::*;
+    Some(match op {
+        Operator::I64Clz => Clz,
+        Operator::I64Ctz => Ctz,
+        Operator::I64Popcnt => Popcnt,
+        Operator::I64Extend8S => Extend8S,
+        Operator::I64Extend16S => Extend16S,
+        Operator::I64Extend32S | Operator::I64ExtendI32S => Extend32S,
+        _ => return None,
+    })
 }

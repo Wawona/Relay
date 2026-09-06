@@ -23,7 +23,7 @@ let
     installPhase = ''
       mkdir -p $out/share/oci-runtime-tools/validation
       cp runtimetest oci-runtime-tool rootfs-amd64.tar.gz $out/share/oci-runtime-tools/
-      cp validation/*.t $out/share/oci-runtime-tools/validation/
+      cp validation/*/*.t $out/share/oci-runtime-tools/validation/
     '';
   };
   runSuite = pkgs.writeShellScript "run-oci-conformance" ''
