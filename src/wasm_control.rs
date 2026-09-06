@@ -252,6 +252,18 @@ pub(super) fn compile(
                 });
                 stack.push(dst);
             }
+            ref other if super::integer32_kind(other).is_some() => {
+                let rhs = stack.pop().ok_or_else(unsupported)?;
+                let lhs = stack.pop().ok_or_else(unsupported)?;
+                let dst = fresh()?;
+                ops.push(Op::Int32 {
+                    kind: super::integer32_kind(other).unwrap(),
+                    dst,
+                    lhs,
+                    rhs,
+                });
+                stack.push(dst);
+            }
             Operator::Drop => {
                 stack.pop().ok_or_else(unsupported)?;
             }

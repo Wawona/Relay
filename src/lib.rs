@@ -11,6 +11,8 @@ pub mod wasm;
 pub mod baseline;
 
 mod integer;
+mod integer32;
+pub use integer32::Int32;
 mod optimize;
 pub use integer::{Int64, Unary64};
 
@@ -42,6 +44,12 @@ pub enum Op {
         rhs: u16,
     },
     DivSigned {
+        dst: u16,
+        lhs: u16,
+        rhs: u16,
+    },
+    Int32 {
+        kind: Int32,
         dst: u16,
         lhs: u16,
         rhs: u16,
@@ -185,7 +193,8 @@ impl Program {
                 Op::Add { dst, lhs, rhs }
                 | Op::Mul { dst, lhs, rhs }
                 | Op::DivSigned { dst, lhs, rhs }
-                | Op::Int64 { dst, lhs, rhs, .. } => valid(dst) && valid(lhs) && valid(rhs),
+                | Op::Int64 { dst, lhs, rhs, .. }
+                | Op::Int32 { dst, lhs, rhs, .. } => valid(dst) && valid(lhs) && valid(rhs),
                 Op::Select {
                     dst,
                     condition,
@@ -313,6 +322,7 @@ fn handler_for(op: Op) -> Handler {
         Op::Mul { .. } => mul,
         Op::DivSigned { .. } => div_signed,
         Op::Int64 { kind, .. } => integer::handler(kind),
+        Op::Int32 { kind, .. } => integer32::handler(kind),
         Op::Unary64 { kind, .. } => integer::unary_handler(kind),
         Op::Eqz { .. } => eqz,
         Op::Trap => trap,

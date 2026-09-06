@@ -89,6 +89,12 @@ pub enum Unary64 {
     Extend8S,
     Extend16S,
     Extend32S,
+    Wrap32,
+    Clz32,
+    Ctz32,
+    Popcnt32,
+    Extend8S32,
+    Extend16S32,
 }
 pub(crate) fn unary_handler(kind: Unary64) -> Handler {
     match kind {
@@ -98,6 +104,12 @@ pub(crate) fn unary_handler(kind: Unary64) -> Handler {
         Unary64::Extend8S => unary::<3>,
         Unary64::Extend16S => unary::<4>,
         Unary64::Extend32S => unary::<5>,
+        Unary64::Wrap32 => unary::<6>,
+        Unary64::Clz32 => unary::<7>,
+        Unary64::Ctz32 => unary::<8>,
+        Unary64::Popcnt32 => unary::<9>,
+        Unary64::Extend8S32 => unary::<10>,
+        Unary64::Extend16S32 => unary::<11>,
     }
 }
 fn unary<const KIND: u8>(i: &Instruction, s: &mut State<'_>) -> Result<Control, Error> {
@@ -111,6 +123,12 @@ fn unary<const KIND: u8>(i: &Instruction, s: &mut State<'_>) -> Result<Control, 
             3 => a as i8 as i64 as u64,
             4 => a as i16 as i64 as u64,
             5 => a as i32 as i64 as u64,
+            6 => a as u32 as u64,
+            7 => (a as u32).leading_zeros() as u64,
+            8 => (a as u32).trailing_zeros() as u64,
+            9 => (a as u32).count_ones() as u64,
+            10 => a as i8 as i32 as u32 as u64,
+            11 => a as i16 as i32 as u32 as u64,
             _ => unreachable!(),
         };
     }

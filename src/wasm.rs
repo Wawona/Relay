@@ -173,6 +173,18 @@ impl Function {
                     });
                     stack.push(dst);
                 }
+                ref other if integer32_kind(other).is_some() => {
+                    let rhs = stack.pop().ok_or_else(unsupported)?;
+                    let lhs = stack.pop().ok_or_else(unsupported)?;
+                    let dst = fresh()?;
+                    ops.push(Op::Int32 {
+                        kind: integer32_kind(other).unwrap(),
+                        dst,
+                        lhs,
+                        rhs,
+                    });
+                    stack.push(dst);
+                }
                 Operator::Drop => {
                     stack.pop().ok_or_else(unsupported)?;
                 }
@@ -262,12 +274,50 @@ fn integer_kind(op: &Operator<'_>) -> Option<crate::Int64> {
 fn unary_kind(op: &Operator<'_>) -> Option<crate::Unary64> {
     use crate::Unary64::*;
     Some(match op {
+        Operator::I32WrapI64 => Wrap32,
+        Operator::I32Clz => Clz32,
+        Operator::I32Ctz => Ctz32,
+        Operator::I32Popcnt => Popcnt32,
+        Operator::I32Extend8S => Extend8S32,
+        Operator::I32Extend16S => Extend16S32,
         Operator::I64Clz => Clz,
         Operator::I64Ctz => Ctz,
         Operator::I64Popcnt => Popcnt,
         Operator::I64Extend8S => Extend8S,
         Operator::I64Extend16S => Extend16S,
         Operator::I64Extend32S | Operator::I64ExtendI32S => Extend32S,
+        _ => return None,
+    })
+}
+
+fn integer32_kind(op: &Operator<'_>) -> Option<crate::Int32> {
+    use crate::Int32::*;
+    Some(match op {
+        Operator::I32Add => Add,
+        Operator::I32Mul => Mul,
+        Operator::I32DivS => DivS,
+        Operator::I32Sub => Sub,
+        Operator::I32And => And,
+        Operator::I32Or => Or,
+        Operator::I32Xor => Xor,
+        Operator::I32Shl => Shl,
+        Operator::I32ShrS => ShrS,
+        Operator::I32ShrU => ShrU,
+        Operator::I32Rotl => Rotl,
+        Operator::I32Rotr => Rotr,
+        Operator::I32Eq => Eq,
+        Operator::I32Ne => Ne,
+        Operator::I32LtS => LtS,
+        Operator::I32LtU => LtU,
+        Operator::I32GtS => GtS,
+        Operator::I32GtU => GtU,
+        Operator::I32LeS => LeS,
+        Operator::I32LeU => LeU,
+        Operator::I32GeS => GeS,
+        Operator::I32GeU => GeU,
+        Operator::I32DivU => DivU,
+        Operator::I32RemS => RemS,
+        Operator::I32RemU => RemU,
         _ => return None,
     })
 }

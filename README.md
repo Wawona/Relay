@@ -18,10 +18,11 @@ This is a target, not a measured result or an App Store approval claim.
 - Add/multiply fusion preserving aliasing, branch entries, and IR fuel accounting.
 - Guarded affine-loop acceleration using modular exponentiation. Only pure,
   recognized loops qualify; guards retain the original bounded execution path.
-- Experimental pure i64 WASM function frontend using full module validation,
+- Experimental integer WASM frontend with i64 export signatures, full module validation,
   SSA locals for straight-line code and explicit register merges for structured
   control. Handles blocks, loops, if/else, branches, returns, integer arithmetic,
-  comparisons, eager select, shifts, rotations, bit counts, and sign extensions. Unsupported
+  i32/i64 arithmetic, comparisons, eager select, shifts, rotations, bit counts,
+  and sign extensions. Unsupported
   features fail before execution; calls, memory, and WASI still use Pulley.
 - Differential fusion tests, memory/trap tests, concurrent invocation tests,
   real binary WASM tests, and a dispatch microbenchmark with raw samples.
