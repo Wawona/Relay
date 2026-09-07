@@ -1,0 +1,29 @@
+---
+description: wwn-vms role. virtual_machine engines; Mode A jitless vs Mode B JIT
+alwaysApply: true
+---
+
+# This repo: `wwn-vms`
+
+Machines kind **`virtual_machine`**. Not containers, not Wasm packages, not
+Desktop/LockScreen, not Swinging Bridge.
+
+## Mode A vs Mode B (design both)
+
+| | Mode A (store) | Mode B |
+|---|---|---|
+| iOS / iPadOS | UTM-SE-class **jitless** QEMU-TCTI | UTM/QEMU **+ JIT** (TrollStore and/or Sileo Mode B IPA) |
+| tvOS / watchOS / visionOS | **Forbidden** | **Forbidden** |
+| macOS | **QEMU + HVF** (Hypervisor.framework) | Same (macOS is not App Store constrained) |
+| Android | QEMU + KVM when present, else TCG+JIT | Root/privileged outside Play |
+
+- **Never** link JIT Mode B into App Store / Play artifacts.
+- tvOS / watchOS / visionOS: VM kinds **forbidden** (policy).
+- iOS: TrollStore = JIT + Desktop/LockScreen, without Swinging Bridge. Sileo adds the full jailbreak surface. See Wawona `wawona-ios-mode-b-channels`.
+- Per-OS backends differ. Do not force one QEMU binary onto every host.
+- Leave active Apple Container work in `wwn-containers` alone unless asked.
+
+Accel lane: `capabilities.nix` (`hvf` / `tcti` / `android-hv`).
+Rust argv helper: `crates/wwn-vms-engine` (`Tcti` vs `TcgJit`).
+
+Canonical: `Wawona/docs/vms-mode-a-b.md`, `mode-a-b.md`, `wawona-product-map`.
