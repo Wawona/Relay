@@ -1,0 +1,9 @@
+[package]
+name = "relay-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mode A WASI path. Pulley on Apple mobile, Cranelift on macOS/Linux"
+
+[dependencies]
+relay-core = { path = "../relay-core" }

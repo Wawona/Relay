@@ -1,0 +1,22 @@
+[workspace]
+members = [
+  "crates/relay-core",
+  "crates/relay-vm",
+  "crates/relay-oci",
+  "crates/relay-wasm",
+  "crates/relay-ffi",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Wawona/Relay"
+authors = ["Alex Spaulding"]
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 1
+panic = "unwind"

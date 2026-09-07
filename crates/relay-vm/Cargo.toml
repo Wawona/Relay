@@ -1,0 +1,10 @@
+[package]
+name = "relay-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux VM backends: VZ, KVM, AVF-lab, static CPU, Mode B JIT. Never QEMU"
+
+[dependencies]
+relay-core = { path = "../relay-core" }
+thiserror = "2"

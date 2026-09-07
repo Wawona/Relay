@@ -1,0 +1,9 @@
+[package]
+name = "relay-oci"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OCI pull/unpack for container-in-VM. No host runc, no proot"
+
+[dependencies]
+relay-core = { path = "../relay-core" }

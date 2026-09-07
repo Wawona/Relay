@@ -1,0 +1,17 @@
+[package]
+name = "relay-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI for AppKit, UIKit, JNI, and Linux GTK"
+
+[lib]
+name = "wawona_relay"
+crate-type = ["staticlib", "rlib", "cdylib"]
+
+[dependencies]
+relay-core = { path = "../relay-core" }
+relay-oci = { path = "../relay-oci" }
+relay-vm = { path = "../relay-vm" }
+relay-wasm = { path = "../relay-wasm" }
+serde_json = "1"
