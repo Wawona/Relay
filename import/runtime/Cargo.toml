@@ -1,0 +1,29 @@
+[package]
+name = "wwn-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Wawona static-handler execution research engine"
+
+[workspace]
+members = ["."]
+
+[features]
+default = ["wasm"]
+wasm = ["dep:wasmparser"]
+wasmtime-baseline = ["dep:wasmtime"]
+
+[dependencies]
+wasmparser = { version = "=0.229.0", optional = true }
+wasmtime = { version = "=33.0.2", optional = true, default-features = false, features = ["runtime", "component-model", "gc", "gc-drc", "std", "pulley", "cranelift"] }
+
+[dev-dependencies]
+object = { version = "=0.36.7", default-features = false, features = ["read", "elf"] }
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
