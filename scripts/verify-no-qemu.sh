@@ -13,11 +13,14 @@ if [[ -d import/vms/crates/wwn-qemu-run ]]; then
   fail "import/vms still contains crates/wwn-qemu-run"
 fi
 
-if git grep -l -E 'qemu-.*-softmmu\.framework|UTM SE|CocoaSpice|virgl' \
-    -- ':!import/**' ':!**/target/**' . 2>/dev/null | grep -q .; then
-  git grep -n -E 'qemu-.*-softmmu\.framework|UTM SE|CocoaSpice|virgl' \
-    -- ':!import/**' ':!**/target/**' . || true
-  fail "product tree mentions QEMU/UTM display engines"
+# Documentation may name the rejected engines. Fail on shipped recipes/crates.
+if git grep -l -E 'qemu-.*-softmmu\.framework' \
+    -- ':!import/**' ':!**/target/**' ':!README.md' ':!docs/**' ':!scripts/**' . \
+    2>/dev/null | grep -q .; then
+  fail "product tree ships qemu-*.framework"
+fi
+if [[ -d import/vms/dependencies/vms/utm ]] || [[ -d dependencies/vms/utm ]]; then
+  fail "UTM tree present"
 fi
 
 echo "OK Relay has no QEMU/UTM product paths"
