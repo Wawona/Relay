@@ -52,6 +52,11 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           nix build --impure --file ci/qemu.nix --out-link result-qemu
           ./result-qemu/bin/qemu-system-x86_64 --version > artifacts/qemu-version.txt
+          ./result-qemu/bin/qemu-img --version > artifacts/qemu-img-version.txt
+          ./result-qemu/bin/qemu-img create -f qcow2 artifacts/guest-smoke.qcow2 16M
+          ./result-qemu/bin/qemu-img check -f qcow2 artifacts/guest-smoke.qcow2
+          ./result-qemu/bin/qemu-img info --output=json artifacts/guest-smoke.qcow2 > artifacts/guest-disk.json
+          rm artifacts/guest-smoke.qcow2
           readlink result-qemu > artifacts/qemu-store-path.txt
           cargo +1.97.1 run --locked --release --no-default-features --example qemu_smoke -- ./result-qemu/bin/qemu-system-x86_64 > artifacts/qemu.jsonl
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

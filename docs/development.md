@@ -122,5 +122,21 @@ Current priority is runtime implementation and Wawona app integration. UTM
 comparisons are deferred. Cross-repository source pins and publication access
 still need finalization. Do not build release claims from this tree.
 
+Further integration evidence (2026-09-06):
+- Generated the full Wawona iOS Simulator project through Nix, retaining native
+  Weston and Niri. XcodeBuildMCP built the app successfully. Installed and opened
+  that artifact with agent-device; its main binary defines `wawona_wasm_run` and
+  `wawona_wasm_can_run`. This source snapshot predates the i32 commit 805a1ea.
+  In-app guest completion remains unverified; the standalone P1/P2 results above
+  must not be described as execution through Machines.
+- Container image correctness CI passed on macOS and Linux at 83e4d34 in
+  wwn-containers. This does not establish full OCI runtime conformance.
+- Runtime CI at 40a85b3 passed host, Apple compile, and QEMU guest jobs. The OCI
+  guest failed before boot because the reference package omitted `qemu-img`.
+  Enable QEMU tools and assert installed binaries; add a CI disk creation and
+  integrity smoke check. Local macOS package rebuild, 16 MiB qcow2 creation and
+  integrity check, and three real interpreter guest runs passed. Each guest
+  verified a million arithmetic iterations. Linux OCI guest rerun is pending.
+
 No UTM JIT comparison, full WASI integration, QEMU backend, OCI integration,
 physical-device execution of this engine, or App Store review has passed yet.
