@@ -1,0 +1,11 @@
+[package]
+name = "wayland-shm"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone demo; not part of the wwn-wasm workspace (rustup-only build).
+[workspace]
+
+[[bin]]
+name = "wayland-shm"
+path = "src/main.rs"

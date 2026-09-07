@@ -1,0 +1,95 @@
+name: ci
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  readme-badge:
+    name: README CI badge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: README has CI status badge
+        run: grep -E 'actions/workflows/.+/badge\.svg' README.md
+  cargo:
+    name: cargo check + test (Pulley)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: verify iOS recipe is Pulley-only
+        run: python3 .github/scripts/verify-wasm-ios-patches.py
+      - name: check (Pulley)
+        run: cargo check --no-default-features --features pulley
+      - name: test (sandbox)
+        run: cargo test --no-default-features --features pulley --lib
+
+  runtime-wpm:
+    name: Runtime + wpm smoke (Go WASI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: smoke-runtime-wpm
+        run: |
+          chmod +x ./.github/scripts/smoke-runtime-wpm.sh
+          cargo build -p wawona-wasm --bin wasm --no-default-features --features cranelift-native
+          cargo build -p wpm --bin wpm --features cli,registry
+          export WASM_BIN="$PWD/target/debug/wasm"
+          export WPM_BIN="$PWD/target/debug/wpm"
+          ./.github/scripts/smoke-runtime-wpm.sh
+
+  wayland-guest:
+    name: build wayland-shm guest (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: build guest
+        run: |
+          cd examples/wayland-shm/rust
+          cargo build --target wasm32-wasip1 --release
+          python3 -c "b=open('target/wasm32-wasip1/release/wayland-shm.wasm','rb').read(4); assert b==b'\\x00asm', b"
+
+  wayland-smoke:
+    name: Wayland SHM smoke (Weston headless)
+    runs-on: ubuntu-latest
+    needs: [cargo]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - name: smoke against Weston
+        run: |
+          chmod +x ./.github/scripts/smoke-wayland-shm.sh
+          nix shell nixpkgs#weston --command ./.github/scripts/smoke-wayland-shm.sh
+
+  eval:
+    name: flake eval (instantiation)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - name: fragment evaluates
+        run: nix eval .#registryFragment --apply builtins.attrNames

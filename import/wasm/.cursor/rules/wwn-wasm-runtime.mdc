@@ -1,0 +1,36 @@
+---
+description: Wawona Runtime (wwn-wasm) — always App Store compliant; WASI packages only; no Mode B Runtime
+alwaysApply: true
+---
+
+# This repo: Wawona Runtime (`wwn-wasm`)
+
+**Wawona Runtime is always App Store / Play compliant.** There is **no Mode B
+Runtime**, no JIT Runtime flavor, and no jailbreak-only Runtime build.
+
+**Wasm is not platform-native** (tradeoff vs a Mach-O port). Document that
+honestly: the payoff is a **portable** Runtime + **`wpm`** (WASI P1/P2) that
+developers and users can target once under full store compliance. Prefer a
+native in-process port when we ship one; do not pretend Wasm is native.
+
+## You own
+
+- WASI P1/P2 / Component Model host (`wwn-wasm`)
+- Package client **`wpm`** + local package store
+- Mode A registry client for `https://repo.wawona.io/wasm/…`
+
+## Hard rules
+
+1. Packages are **`.wasm` bytecode as data** — not Mach-O, not `.deb`, not OCI
+   Linux containers (`wwn-containers`), not VMs (`wwn-vms`).
+2. Store binaries may speak only to **`/wasm/`**. Never fetch, link, or hint
+   `repo.wawona.io/jailbreak/` or Sileo APT from Runtime/`wpm`.
+3. Do not add Mode B gates, jailbreak strings, or “enable JIT Runtime” paths.
+4. Dual ingest is fine: Files.app / SCP drop **and** `wpm install` from `/wasm/`.
+5. Retired: `wwn-apt` / StoreKit Mach-O modules — do not revive.
+
+If users need Desktop Mode B, Swinging Bridge Mode B, or JIT VMs, that lives in
+other repos + Mode B IPA — **not** here.
+
+Canonical: `Wawona/docs/wasm-package-manager.md`, `wasm-wasi.md`, `mode-a-b.md`,
+`wawona-product-map`.

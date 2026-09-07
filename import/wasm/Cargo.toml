@@ -1,0 +1,54 @@
+[workspace]
+members = [".", "crates/wpm"]
+exclude = [
+  "examples/rust",
+  "examples/wasip2",
+  "examples/wayland-shm/rust",
+]
+resolver = "2"
+
+[package]
+name = "wawona-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT"
+description = "Wawona in-process WASI P1/P2 interpreter (Pulley on Apple mobile, Cranelift on macOS)."
+repository = "https://github.com/Wawona/wwn-wasm"
+authors = ["Alex Spaulding"]
+
+[lib]
+name = "wawona_wasm"
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "wasm"
+path = "src/bin/wasm.rs"
+
+[features]
+default = ["pulley"]
+pulley = ["wasmtime/pulley", "wasmtime/cranelift"]
+cranelift-native = ["wasmtime/cranelift"]
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+# cli + registry: Mode A HTTPS client for repo.wawona.io/wasm (iOS in-process
+# wpm_main and macOS staticlib both need search/install by name).
+wpm = { path = "crates/wpm", default-features = false, features = ["cli", "registry"] }
+wasmtime = { version = "33", default-features = false, features = [
+  "runtime",
+  "component-model",
+  "gc",
+  "gc-drc",
+  "std",
+] }
+wasmtime-wasi = { version = "33", default-features = false, features = [
+  "preview1",
+] }
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 1
+panic = "unwind"

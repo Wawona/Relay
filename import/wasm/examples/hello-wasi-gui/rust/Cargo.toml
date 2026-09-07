@@ -1,0 +1,12 @@
+[package]
+name = "hello-wasi-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal Wayland (wl_shm + xdg) hello window for Wawona Runtime"
+
+# Standalone demo; not part of the wwn-wasm workspace (rustup-only build).
+[workspace]
+
+[[bin]]
+name = "hello-wasi-gui"
+path = "src/main.rs"
