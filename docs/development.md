@@ -123,6 +123,11 @@ comparisons are deferred. Cross-repository source pins and publication access
 still need finalization. Do not build release claims from this tree.
 
 Further integration evidence (2026-09-06):
+- Integer exports now accept i32 and mixed i32/i64 parameters with one integer
+  result. The public signature exposes widths; the bit-pattern API truncates
+  i32 arguments and returns zero-extended i32 results. Straight-line and
+  structured-control tests cover width boundaries, fuel exhaustion, and Pulley
+  equivalence. All 29 runtime tests and Clippy pass locally.
 - Generated the full Wawona iOS Simulator project through Nix, retaining native
   Weston and Niri. XcodeBuildMCP built the app successfully. Installed and opened
   that artifact with agent-device; its main binary defines `wawona_wasm_run` and

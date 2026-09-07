@@ -18,7 +18,7 @@ This is a target, not a measured result or an App Store approval claim.
 - Add/multiply fusion preserving aliasing, branch entries, and IR fuel accounting.
 - Guarded affine-loop acceleration using modular exponentiation. Only pure,
   recognized loops qualify; guards retain the original bounded execution path.
-- Experimental integer WASM frontend with i64 export signatures, full module validation,
+- Experimental integer WASM frontend with mixed i32/i64 export signatures, full module validation,
   SSA locals for straight-line code and explicit register merges for structured
   control. Handles blocks, loops, if/else, branches, returns, integer arithmetic,
   i32/i64 arithmetic, comparisons, eager select, shifts, rotations, bit counts,

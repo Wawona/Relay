@@ -1,13 +1,37 @@
-//! Experimental pure i64 function frontend. Unsupported features are rejected
+//! Experimental pure integer function frontend. Unsupported features are rejected
 //! before execution; this module makes no WASI or full-WASM conformance claim.
 use crate::{Error, Op, Outcome, Program};
 use wasmparser::{ExternalKind, Operator, Parser, Payload, ValType, Validator};
 #[path = "wasm_control.rs"]
 mod control;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegerType {
+    I32,
+    I64,
+}
+
+impl IntegerType {
+    fn from_wasm(value: ValType) -> Result<Self, Error> {
+        match value {
+            ValType::I32 => Ok(Self::I32),
+            ValType::I64 => Ok(Self::I64),
+            _ => Err(Error::InvalidProgram("unsupported function value type")),
+        }
+    }
+
+    fn normalize(self, value: u64) -> u64 {
+        match self {
+            Self::I32 => value as u32 as u64,
+            Self::I64 => value,
+        }
+    }
+}
+
 pub struct Function {
     program: Program,
-    parameters: usize,
+    parameters: Vec<IntegerType>,
+    result: IntegerType,
 }
 
 impl Function {
@@ -56,12 +80,18 @@ impl Function {
         }
         let index = selected.ok_or(Error::InvalidProgram("missing function export"))?;
         let ty = &types[functions[index]];
-        if ty.params().iter().any(|v| *v != ValType::I64) || ty.results() != [ValType::I64] {
+        if ty.results().len() != 1 {
             return Err(unsupported());
         }
-        let parameters = ty.params().len();
+        let result = IntegerType::from_wasm(ty.results()[0])?;
+        let parameters = ty
+            .params()
+            .iter()
+            .copied()
+            .map(IntegerType::from_wasm)
+            .collect::<Result<Vec<_>, _>>()?;
         let body = &bodies[index];
-        let mut local_count = parameters;
+        let mut local_count = parameters.len();
         for local in body.get_locals_reader().map_err(|_| unsupported())? {
             let (count, ty) = local.map_err(|_| unsupported())?;
             if !matches!(ty, ValType::I64 | ValType::I32) {
@@ -96,6 +126,7 @@ impl Function {
             return Ok(Self {
                 program: control::compile(body, local_count, fusion)?,
                 parameters,
+                result,
             });
         }
         let mut locals: Vec<_> = (0..local_count).map(|v| v as u16).collect();
@@ -227,13 +258,40 @@ impl Function {
         Ok(Self {
             program,
             parameters,
+            result,
         })
     }
 
+    pub fn parameter_types(&self) -> &[IntegerType] {
+        &self.parameters
+    }
+
+    pub fn result_type(&self) -> IntegerType {
+        self.result
+    }
+
+    /// Arguments and results carry integer bit patterns. I32 arguments use their
+    /// low 32 bits; I32 results are zero extended. Signedness belongs to each
+    /// WebAssembly operator, not to the function signature.
     pub fn run(&self, args: &[u64], fuel: u64) -> Result<Outcome, Error> {
-        if args.len() != self.parameters {
+        if args.len() != self.parameters.len() {
             return Err(Error::InvalidArguments);
         }
+        let normalized;
+        let args = if args
+            .iter()
+            .zip(&self.parameters)
+            .any(|(&arg, &ty)| ty.normalize(arg) != arg)
+        {
+            normalized = args
+                .iter()
+                .zip(&self.parameters)
+                .map(|(&arg, &ty)| ty.normalize(arg))
+                .collect::<Vec<_>>();
+            &normalized
+        } else {
+            args
+        };
         self.program.run(args, &mut [], fuel)
     }
 
