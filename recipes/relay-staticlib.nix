@@ -101,10 +101,19 @@ else
     # Apple mobile. That cp has no files and fails the drv after a good
     # staticlib. Skip it. Install only the cross archive.
     dontCargoInstall = true;
+    # Device staticlibs pull zstd-sys C objects that reference
+    # ___chkstk_darwin. Without -lSystem / -target matching the Apple
+    # env, rustc's default aarch64-apple-ios link line (min 10.0) fails
+    # while simulator builds still pass. Also feed CC/CFLAGS so cc-rs
+    # does not emit SDK-default 26.5 objects against a 10.0 link.
     buildPhase = ''
       runHook preBuild
       ${iosToolchain.mkIOSBuildEnv { inherit simulator; }}
       export IOS_SDK="$SDKROOT"
+      export CC="$XCODE_CLANG"
+      export CXX="$XCODE_CLANGXX"
+      export CFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -target $APPLE_LINKER_TARGET $APPLE_DEPLOYMENT_FLAG"
+      export CXXFLAGS="$CFLAGS"
       cargo rustc \
         --jobs "''${NIX_BUILD_CORES}" \
         --offline \
@@ -117,7 +126,12 @@ else
     preConfigure = ''
       ${iosToolchain.mkIOSBuildEnv { inherit simulator; }}
       export IOS_SDK="$SDKROOT"
+      export CC="$XCODE_CLANG"
+      export CXX="$XCODE_CLANGXX"
+      export CFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -target $APPLE_LINKER_TARGET $APPLE_DEPLOYMENT_FLAG"
+      export CXXFLAGS="$CFLAGS"
       mkdir -p .cargo
+      # Optional deployment flag (empty on visionOS: version lives in -target).
       cat > .cargo/config.toml <<CARGO_EOF
 [target.${cargoTarget}]
 linker = "$XCODE_CLANG"
@@ -125,7 +139,12 @@ rustflags = [
   "-C", "linker=$XCODE_CLANG",
   "-C", "link-arg=-arch", "-C", "link-arg=$IOS_ARCH",
   "-C", "link-arg=-isysroot", "-C", "link-arg=$IOS_SDK",
-  "-C", "link-arg=$APPLE_DEPLOYMENT_FLAG"
+  "-C", "link-arg=-target", "-C", "link-arg=$APPLE_LINKER_TARGET",
+  "-C", "link-arg=-lSystem"$(
+        if [ -n "''${APPLE_DEPLOYMENT_FLAG:-}" ]; then
+          printf ',\n  "-C", "link-arg=%s"' "$APPLE_DEPLOYMENT_FLAG"
+        fi
+      )
 ]
 CARGO_EOF
     '';
