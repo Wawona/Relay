@@ -347,36 +347,40 @@ fn wayland_shm_create(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, siz
 }
 
 fn open_anon_shm(size: u64) -> std::io::Result<std::fs::File> {
-    use std::os::unix::io::FromRawFd;
     // shm_open + immediate unlink keeps a live inode for SCM_RIGHTS.
-    let name = format!(
-        "/wwn-wasm-{}-{}-{}",
-        std::process::id(),
-        size,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let cname = std::ffi::CString::new(name).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "shm name")
-    })?;
-    let raw = unsafe {
-        libc::shm_open(
-            cname.as_ptr(),
-            libc::O_CREAT | libc::O_RDWR | libc::O_EXCL,
-            0o600,
-        )
-    };
-    if raw >= 0 {
-        unsafe {
-            let _ = libc::shm_unlink(cname.as_ptr());
+    // Android Bionic has no POSIX shm_open/shm_unlink; use the tmpfile path.
+    #[cfg(not(target_os = "android"))]
+    {
+        use std::os::unix::io::FromRawFd;
+        let name = format!(
+            "/wwn-wasm-{}-{}-{}",
+            std::process::id(),
+            size,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let cname = std::ffi::CString::new(name).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "shm name")
+        })?;
+        let raw = unsafe {
+            libc::shm_open(
+                cname.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR | libc::O_EXCL,
+                0o600,
+            )
+        };
+        if raw >= 0 {
+            unsafe {
+                let _ = libc::shm_unlink(cname.as_ptr());
+            }
+            let file = unsafe { std::fs::File::from_raw_fd(raw) };
+            file.set_len(size)?;
+            return Ok(file);
         }
-        let file = unsafe { std::fs::File::from_raw_fd(raw) };
-        file.set_len(size)?;
-        return Ok(file);
     }
-    // Fallback: XDG_RUNTIME_DIR file (when shm_open is denied).
+    // Fallback: XDG_RUNTIME_DIR file (when shm_open is denied or unavailable).
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| default_xdg_runtime_dir());
     let path = format!("{dir}/wwn-wasm-shm-{}-{}", std::process::id(), size);
     let file = std::fs::OpenOptions::new()
