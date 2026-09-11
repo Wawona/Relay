@@ -18,6 +18,13 @@ let
       let
         base = baseNameOf path;
         pathStr = toString path;
+        underImportWasm =
+          lib.hasSuffix "/import/wasm" pathStr
+          || lib.hasInfix "/import/wasm/" pathStr;
+        keepWasmCrates =
+          lib.hasSuffix "/import/wasm" pathStr
+          || lib.hasSuffix "/import/wasm/crates" pathStr
+          || lib.hasInfix "/import/wasm/crates/" pathStr;
       in
       !(base == "target"
         || base == ".git"
@@ -25,7 +32,7 @@ let
         || lib.hasPrefix "result" base
         || lib.hasInfix "/import/vms/" pathStr
         || lib.hasInfix "/import/containers/" pathStr
-        || lib.hasInfix "/import/wasm/" pathStr
+        || (underImportWasm && !keepWasmCrates)
         || lib.hasInfix "/relay-vm-state" pathStr
         || lib.hasInfix "/.github/" pathStr
         || lib.hasInfix "/docs/" pathStr
