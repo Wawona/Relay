@@ -70,8 +70,9 @@ launcher.
 - WASI: `relay_start` validates modules, then executes via linked
   `wawona_wasm_run` (same process as `libwawona_wasm.a`) or `WAWONA_WASM` /
   `wasm` on PATH. Pulley on Apple mobile and Android Mode A. Cranelift on
-  macOS, Linux, and Android Mode B. Bare `/wasm/v1` package names stay planned
-  until wpm resolution is wired into Relay.
+  macOS, Linux, and Android Mode B. Bare `/wasm/v1` package names resolve
+  through the local `wpm` PackageStore (`wpm install` first). Registry fetch
+  stays in the `wpm` CLI.
 - Linux KVM starts fail closed until their real launch adapters exist. Relay
   never returns a success-shaped VM handle from a placeholder.
 

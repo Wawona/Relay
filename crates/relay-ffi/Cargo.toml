@@ -16,6 +16,5 @@ relay-vm = { path = "../relay-vm" }
 relay-wasm = { path = "../relay-wasm" }
 serde_json = "1"
 
-[features]
-default = []
-ios-hv = ["relay-core/ios-hv", "relay-vm/ios-hv"]
+[dev-dependencies]
+tempfile = "3"

@@ -9,3 +9,8 @@ description = "Mode A WASI path. Pulley on Apple mobile, Cranelift on macOS/Linu
 libc = "0.2"
 relay-core = { path = "../relay-core" }
 wasmparser = "0.240"
+# Store resolve only. Registry fetch stays in the `wpm` CLI.
+wpm = { path = "../../import/wasm/crates/wpm", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

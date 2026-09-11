@@ -54,8 +54,7 @@ pub fn resolve(spec: &RelaySpec) -> Result<RelayBackend, RelayError> {
     resolve_backend(spec)
 }
 
-/// Validate an explicit module before passing it to the bundled WASI engine.
-/// Bare package names stay unresolved here because `wpm` owns `/wasm/v1`.
+/// Validate an explicit module or resolve a `wpm` package name to its blob.
 pub fn prepare(spec: &RelaySpec) -> Result<WasmExecutionPlan, RelayError> {
     let backend = resolve(spec)?;
     let image = spec
@@ -66,26 +65,16 @@ pub fn prepare(spec: &RelaySpec) -> Result<WasmExecutionPlan, RelayError> {
     let mut package = None;
     let module = match image {
         Some(image) if image.contains('/') || image.ends_with(".wasm") => {
-            let path = PathBuf::from(image);
-            let metadata = fs::metadata(&path)
-                .map_err(|error| RelayError::Failed(format!("cannot stat WASM module: {error}")))?;
-            if !metadata.is_file() || metadata.len() < 8 || metadata.len() > MAX_MODULE_BYTES {
-                return Err(RelayError::Failed("WASM module is not a valid file".into()));
-            }
-            let bytes = fs::read(&path)
-                .map_err(|error| RelayError::Failed(format!("cannot read WASM module: {error}")))?;
-            if bytes.get(..4) != Some(b"\0asm") {
-                return Err(RelayError::Failed("WASM module has invalid magic".into()));
-            }
-            wasmparser::Validator::new()
-                .validate_all(&bytes)
-                .map_err(|error| RelayError::Failed(format!("invalid WASM module: {error}")))?;
-            Some(path)
+            Some(validate_module_path(Path::new(image))?)
         }
         Some(image) => {
             validate_package_name(image)?;
             package = Some(image.to_string());
-            None
+            match resolve_wpm_package(image) {
+                Ok(path) => Some(validate_module_path(&path)?),
+                Err(RelayError::Failed(_)) => None,
+                Err(other) => return Err(other),
+            }
         }
         None => None,
     };
@@ -101,10 +90,10 @@ pub fn start(spec: &RelaySpec) -> Result<WasmHandle, RelayError> {
     let plan = prepare(spec)?;
     let module = match (&plan.module, &plan.package) {
         (Some(path), _) => path.clone(),
-        (None, Some(_package)) => {
-            return Err(RelayError::Planned(
-                "WASM package needs wpm /wasm/v1 resolution before Relay execute",
-            ));
+        (None, Some(package)) => {
+            return Err(RelayError::Failed(format!(
+                "WASM package `{package}` is not installed; run `wpm install {package}` (Mode A /wasm/v1 only)"
+            )));
         }
         (None, None) => {
             return Err(RelayError::Failed(
@@ -289,6 +278,34 @@ fn find_wasm_binary() -> Option<PathBuf> {
     None
 }
 
+fn validate_module_path(path: &Path) -> Result<PathBuf, RelayError> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| RelayError::Failed(format!("cannot stat WASM module: {error}")))?;
+    if !metadata.is_file() || metadata.len() < 8 || metadata.len() > MAX_MODULE_BYTES {
+        return Err(RelayError::Failed("WASM module is not a valid file".into()));
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| RelayError::Failed(format!("cannot read WASM module: {error}")))?;
+    if bytes.get(..4) != Some(b"\0asm") {
+        return Err(RelayError::Failed("WASM module has invalid magic".into()));
+    }
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .map_err(|error| RelayError::Failed(format!("invalid WASM module: {error}")))?;
+    Ok(path.to_path_buf())
+}
+
+fn resolve_wpm_package(name: &str) -> Result<PathBuf, RelayError> {
+    let store = wpm::PackageStore::open_default().map_err(|error| {
+        RelayError::Failed(format!("cannot open wpm package store: {error}"))
+    })?;
+    store.resolve_wasm(name).map_err(|error| {
+        RelayError::Failed(format!(
+            "WASM package `{name}` is not installed in wpm store: {error}"
+        ))
+    })
+}
+
 fn validate_package_name(name: &str) -> Result<(), RelayError> {
     if name.len() > 128
         || name.ends_with(".deb")
@@ -314,9 +331,23 @@ fn next_id() -> u64 {
 mod tests {
     use super::*;
     use relay_core::{ArtifactClass, RelayPlatform};
+    use std::sync::{Mutex, OnceLock};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
+    static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_temp_store<R>(f: impl FnOnce(&Path) -> R) -> R {
+        let _guard = STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var(wpm::STORE_ENV, root.path());
+        let out = f(root.path());
+        std::env::remove_var(wpm::STORE_ENV);
+        out
+    }
 
     fn spec(platform: RelayPlatform, image: Option<String>) -> RelaySpec {
         RelaySpec {
@@ -385,21 +416,49 @@ mod tests {
     }
 
     #[test]
-    fn keeps_bare_wpm_package_names_for_catalog_resolution() {
-        let plan = prepare(&spec(RelayPlatform::Ios, Some("hello-wasi-gui".into()))).unwrap();
-        assert_eq!(plan.module, None);
-        assert_eq!(plan.package.as_deref(), Some("hello-wasi-gui"));
-        assert!(prepare(&spec(
-            RelayPlatform::Ios,
-            Some("jailbreak-package.deb".into())
-        ))
-        .is_err());
+    fn bare_wpm_package_names_stay_named_until_installed() {
+        with_temp_store(|_| {
+            let plan = prepare(&spec(RelayPlatform::Ios, Some("hello-wasi-gui".into()))).unwrap();
+            assert_eq!(plan.module, None);
+            assert_eq!(plan.package.as_deref(), Some("hello-wasi-gui"));
+            assert!(prepare(&spec(
+                RelayPlatform::Ios,
+                Some("jailbreak-package.deb".into())
+            ))
+            .is_err());
+        });
     }
 
     #[test]
-    fn start_rejects_package_only_until_wpm_resolve() {
-        let err = start(&spec(RelayPlatform::Macos, Some("hello-wasi-gui".into()))).unwrap_err();
-        assert!(matches!(err, RelayError::Planned(_)));
+    fn start_rejects_missing_wpm_package_with_install_hint() {
+        with_temp_store(|_| {
+            let err = start(&spec(RelayPlatform::Macos, Some("hello-wasi-gui".into()))).unwrap_err();
+            let RelayError::Failed(message) = err else {
+                panic!("expected Failed, got {err:?}");
+            };
+            assert!(message.contains("wpm install hello-wasi-gui"));
+        });
+    }
+
+    #[test]
+    fn prepare_resolves_installed_wpm_package() {
+        with_temp_store(|root| {
+            let wasm = root.join("fixture.wasm");
+            fs::write(&wasm, b"\0asm\x01\0\0\0").unwrap();
+            let store = wpm::PackageStore::open(root).unwrap();
+            store
+                .install_local(&wasm, Some("relay-fixture"), "0.0.1")
+                .unwrap();
+            let plan = prepare(&spec(
+                RelayPlatform::Macos,
+                Some("relay-fixture".into()),
+            ))
+            .unwrap();
+            assert_eq!(plan.package.as_deref(), Some("relay-fixture"));
+            let module = plan.module.expect("resolved module");
+            assert!(module.is_file());
+            assert!(module.ends_with("component.wasm"));
+        });
     }
 
     #[test]

@@ -315,12 +315,15 @@ mod tests {
     }
 
     #[test]
-    fn wasm_package_start_is_planned_until_wpm_resolves() {
+    fn wasm_package_start_requires_wpm_install() {
+        let root = tempfile::tempdir().unwrap();
+        std::env::set_var("WAWONA_WASM_STORE", root.path());
         let (code, output) = call_start(
             r#"{"kind":"wasm","platform":"macos","artifact":"mode_a","image":"hello-wasi-gui"}"#,
         );
-        assert_eq!(code, ERR_PLANNED);
-        assert!(output.contains("/wasm/v1"));
+        std::env::remove_var("WAWONA_WASM_STORE");
+        assert_eq!(code, ERR_FAIL);
+        assert!(output.contains("wpm install hello-wasi-gui"));
     }
 
     #[test]
