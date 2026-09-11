@@ -7,4 +7,13 @@ description = "Linux VM backends: VZ, KVM, AVF-lab, static CPU, Mode B JIT. Neve
 
 [dependencies]
 relay-core = { path = "../relay-core" }
+serde_json = "1"
+sha2 = "0.10.9"
 thiserror = "2"
+
+[dev-dependencies]
+relay-oci = { path = "../relay-oci" }
+
+[features]
+default = []
+ios-hv = ["relay-core/ios-hv"]

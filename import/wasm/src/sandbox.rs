@@ -17,6 +17,15 @@ pub fn sandbox_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Wasmtime fuel for one guest run. Override with `WAWONA_WASM_FUEL` for benches.
+pub fn fuel_budget() -> u64 {
+    std::env::var("WAWONA_WASM_FUEL")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(25_000_000)
+}
+
 /// Canonicalize `guest` against `root`. Deny NUL and path escape.
 pub fn resolve_in_sandbox(root: &Path, guest: &str) -> Result<PathBuf, String> {
     if guest.contains('\0') {

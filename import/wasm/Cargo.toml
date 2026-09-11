@@ -25,6 +25,11 @@ crate-type = ["staticlib", "rlib"]
 name = "wasm"
 path = "src/bin/wasm.rs"
 
+[[bin]]
+name = "wasm_bench"
+path = "src/bin/wasm_bench.rs"
+required-features = ["pulley"]
+
 [features]
 default = ["pulley"]
 pulley = ["wasmtime/pulley", "wasmtime/cranelift"]

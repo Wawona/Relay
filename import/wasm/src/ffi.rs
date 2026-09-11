@@ -46,12 +46,36 @@ pub unsafe extern "C" fn wawona_wasm_can_run(path: *const c_char) -> c_int {
     }
 }
 
+/// `void wawona_wasm_request_interrupt(void)`
+///
+/// Ctrl+C / VINTR from the in-process PTY. Epoch-traps the live guest and
+/// shuts its Wayland sockets so GUI toplevels disappear.
+#[no_mangle]
+pub extern "C" fn wawona_wasm_request_interrupt() {
+    crate::interrupt::request();
+}
+
+/// `int wawona_wasm_is_running(void)`
+#[no_mangle]
+pub extern "C" fn wawona_wasm_is_running() -> c_int {
+    if crate::interrupt::is_running() {
+        1
+    } else {
+        0
+    }
+}
+
 /// `int wawona_wasm_run(int argc, char **argv)`
 #[no_mangle]
 pub unsafe extern "C" fn wawona_wasm_run(argc: c_int, argv: *const *const c_char) -> c_int {
     let args = c_args(argc, argv);
     match std::panic::catch_unwind(|| crate::run_args(&args)) {
-        Ok(Ok(code)) => code,
+        Ok(Ok(code)) => {
+            if code == 130 && std::env::var_os("WAWONA_PTY_FAKE_TTY").is_some() {
+                println!("^C");
+            }
+            code
+        }
         Ok(Err(e)) => {
             // On Apple-mobile fake-TTY shells, host STDERR is the app log.
             // Print runtime errors on stdout so they reach weston-terminal.

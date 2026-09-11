@@ -5,6 +5,7 @@ members = [
   "crates/relay-oci",
   "crates/relay-wasm",
   "crates/relay-ffi",
+  "crates/relay-bench",
 ]
 resolver = "2"
 

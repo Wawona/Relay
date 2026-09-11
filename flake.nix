@@ -1,6 +1,9 @@
 {
   description = "Wawona Relay: Linux VMs, OCI-in-VM, Mode A WASI. No QEMU, no UTM.";
 
+  # Repo ownership remains L3 prime as defined by
+  # Wawona/docs/wwn-repo-dag.md. NixOS and microvm.nix are upstream inputs,
+  # never Wawona L4 or a graphics consumer edge.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
@@ -8,27 +11,45 @@
     wwn-toolchain.url = "github:Wawona/wwn-toolchain/development";
     wwn-toolchain.inputs.nixpkgs.follows = "nixpkgs";
     wwn-toolchain.inputs.rust-overlay.follows = "rust-overlay";
+    # Per-crate Nix store builds. Pin follows L0 wwn-toolchain (not a second
+    # independent crate2nix tip). Product crates must migrate off monolithic
+    # buildRustPackage onto generatedCargoNix.
+    crate2nix.follows = "wwn-toolchain/crate2nix";
     microvm.url = "github:microvm-nix/microvm.nix";
     microvm.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, wwn-toolchain, microvm, ... }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+      wwn-toolchain,
+      crate2nix,
+      microvm,
+      ...
+    }:
     let
       darwinSystems = [ "aarch64-darwin" ];
-      linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
+      linuxSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       allSystems = darwinSystems ++ linuxSystems;
       forAll = nixpkgs.lib.genAttrs allSystems;
       inherit (wwn-toolchain.lib) withPlatformVariants baseRegistry mkToolchains;
 
-      pkgsFor = system: import nixpkgs {
-        inherit system;
-        overlays = [ (import rust-overlay) ];
-        config = {
-          allowUnfree = true;
-          allowUnsupportedSystem = true;
-          android_sdk.accept_license = true;
+      pkgsFor =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+          config = {
+            allowUnfree = true;
+            allowUnsupportedSystem = true;
+            android_sdk.accept_license = true;
+          };
         };
-      };
 
       wasmDir = ./import/wasm/dependencies/libs/wasm;
       vmsDir = ./import/vms/dependencies/vms;
@@ -123,8 +144,8 @@
           linux = containersDir + "/macos/apple-container-forbidden.nix";
         };
         wawona-relay = withPlatformVariants {
-          macos = ./recipes/relay-staticlib.nix;
-          linux = ./recipes/relay-staticlib.nix;
+          macos = ./recipes/relay-crate2nix.nix;
+          linux = ./recipes/relay-crate2nix.nix;
           ios = ./recipes/relay-staticlib.nix;
           ipados = ./recipes/relay-staticlib.nix;
           tvos = ./recipes/relay-staticlib.nix;
@@ -134,28 +155,83 @@
         };
       };
 
-      packages = forAll (system:
+      packages = forAll (
+        system:
         let
           pkgs = pkgsFor system;
-          tc = mkToolchains { inherit pkgs; registry = baseRegistry // self.registryFragment; };
+          tc = mkToolchains {
+            inherit pkgs;
+            registry = baseRegistry // self.registryFragment;
+          };
           isDarwin = builtins.elem system darwinSystems;
           hostWasm =
-            if isDarwin then tc.buildForMacOS "wawona-wasm" { }
-            else tc.buildForLinux "wawona-wasm" { };
-          hostRelay = pkgs.callPackage ./recipes/relay-staticlib.nix { };
+            if isDarwin then tc.buildForMacOS "wawona-wasm" { } else tc.buildForLinux "wawona-wasm" { };
+          hostRelay = pkgs.callPackage ./recipes/relay-crate2nix.nix {
+            inherit crate2nix;
+          };
+          hostRelayStatic = pkgs.callPackage ./recipes/relay-staticlib.nix { };
+          guestPkgs = pkgsFor "aarch64-linux";
+          mobileGuest4kConfig = import ./import/vms/dependencies/vms/mobile/guest.nix {
+            inherit nixpkgs;
+            guestSystem = "aarch64-linux";
+            pageSize = 4096;
+          };
+          mobileGuest4k = guestPkgs.callPackage ./import/vms/dependencies/vms/mobile/guest-artifacts.nix {
+            mobileGuest = mobileGuest4kConfig;
+            pageSize = 4096;
+          };
+          mobileGuest16kConfig = import ./import/vms/dependencies/vms/mobile/guest.nix {
+            inherit nixpkgs;
+            guestSystem = "aarch64-linux";
+            pageSize = 16384;
+          };
+          mobileGuest16k = guestPkgs.callPackage ./import/vms/dependencies/vms/mobile/guest-artifacts.nix {
+            mobileGuest = mobileGuest16kConfig;
+            pageSize = 16384;
+          };
         in
         {
           default = hostRelay;
           wawona-relay = hostRelay;
+          wawona-relay-staticlib = hostRelayStatic;
           wawona-wasm = hostWasm;
-        } // (if isDarwin then {
-          wawona-wasm-macos = hostWasm;
-          wawona-wasm-ios = tc.buildForIOS "wawona-wasm" { };
-          wawona-wasm-watchos = tc.buildForWatchOS "wawona-wasm" { };
-          wawona-wasm-watchos-sim = tc.buildForWatchOS "wawona-wasm" { simulator = true; };
-        } else {
-          wawona-wasm-linux = hostWasm;
-        })
+          wawona-nixos-guest-4k = mobileGuest4k;
+          wawona-nixos-guest-16k = mobileGuest16k;
+          relay-mode-a-bench = pkgs.callPackage ./recipes/relay-mode-a-bench.nix {
+            inherit crate2nix;
+          };
+        }
+        // (
+          if isDarwin then
+            {
+              wawona-vz-run = pkgs.callPackage ./import/vms/dependencies/vms/vz-launcher.nix { };
+              wawona-wasm-macos = hostWasm;
+              wawona-wasm-ios = tc.buildForIOS "wawona-wasm" { };
+              wawona-wasm-watchos = tc.buildForWatchOS "wawona-wasm" { };
+              wawona-wasm-watchos-sim = tc.buildForWatchOS "wawona-wasm" { simulator = true; };
+              wawona-relay-ios = tc.buildForIOS "wawona-relay" { };
+              wawona-relay-ios-sim = tc.buildForIOS "wawona-relay" { simulator = true; };
+              wawona-relay-watchos = tc.buildForWatchOS "wawona-relay" { };
+              wawona-relay-watchos-sim = tc.buildForWatchOS "wawona-relay" { simulator = true; };
+            }
+          else
+            {
+              wawona-wasm-linux = hostWasm;
+            }
+        )
+      );
+
+      apps = forAll (
+        system:
+        let
+          pkg = self.packages.${system}.relay-mode-a-bench;
+        in
+        {
+          relay-mode-a-bench = {
+            type = "app";
+            program = "${pkg}/bin/relay-mode-a-bench";
+          };
+        }
       );
 
       inherit microvm;

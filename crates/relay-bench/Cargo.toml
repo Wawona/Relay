@@ -1,0 +1,36 @@
+[package]
+name = "relay-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mode A App Store-safe Relay benches vs interpreter-class engines"
+
+[lib]
+name = "relay_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "relay-mode-a-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "relay-bench-asbestos"
+path = "src/bin/relay-bench-asbestos.rs"
+
+[[bin]]
+name = "relay-bench-unicorn"
+path = "src/bin/relay-bench-unicorn.rs"
+
+[[bin]]
+name = "relay-bench-tcti"
+path = "src/bin/relay-bench-tcti.rs"
+
+[[bin]]
+name = "relay-bench-jit-utm"
+path = "src/bin/relay-bench-jit-utm.rs"
+
+[dependencies]
+relay-core = { path = "../relay-core" }
+relay-vm = { path = "../relay-vm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

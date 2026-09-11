@@ -56,7 +56,10 @@ pub fn run(engine: &Engine, path: &std::path::Path, args: &[String]) -> Result<i
             wasi: builder.build(),
         },
     );
-    store.set_fuel(25_000_000).ok();
+    store
+        .set_fuel(crate::sandbox::fuel_budget())
+        .ok();
+    let _session = crate::interrupt::RunSession::begin(engine, &mut store);
 
     let cmd = wasmtime_wasi::p2::bindings::sync::Command::instantiate(
         &mut store,
@@ -64,9 +67,10 @@ pub fn run(engine: &Engine, path: &std::path::Path, args: &[String]) -> Result<i
         &linker,
     )
     .context("instantiate wasi:cli/command")?;
-    match cmd.wasi_cli_run().call_run(&mut store) {
+    let result = match cmd.wasi_cli_run().call_run(&mut store) {
         Ok(Ok(())) => Ok(0),
         Ok(Err(())) => Ok(1),
         Err(e) => Err(e).context("P2 run"),
-    }
+    };
+    crate::interrupt::map_run_result(result)
 }

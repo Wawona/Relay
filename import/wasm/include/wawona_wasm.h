@@ -24,6 +24,16 @@ int wawona_wasm_can_run(const char *path);
  */
 int wawona_wasm_run(int argc, char **argv);
 
+/*
+ * Cooperative stop for the live `wawona_wasm_run` (Ctrl+C / VINTR).
+ * Epoch-traps the interpreter and shuts guest Wayland sockets so the
+ * compositor drops GUI toplevels. Safe when no guest is running.
+ */
+void wawona_wasm_request_interrupt(void);
+
+/* 1 while `wawona_wasm_run` is on the stack. */
+int wawona_wasm_is_running(void);
+
 /* Terminal raw/cooked bit owned by the current WASM process (0 cooked, 1 raw). */
 int wawona_terminal_raw_enabled(void);
 

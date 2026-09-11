@@ -1,76 +1,45 @@
-# wwn-containers: Mode A / Mode B implementation plan
+# Containers in Relay. Mode A / Mode B
 
 Canonical product split: [Wawona `docs/mode-a-b.md`](https://github.com/Wawona/Wawona/blob/development/docs/mode-a-b.md).
-Mirror: keep this file in sync with `Wawona/docs/containers-mode-a-b.md`.
+Engine: **Wawona Relay**. Not QEMU. Not UTM. Not host Docker. Not proot.
+
+This file used to describe UTM-SE / QEMU-TCTI container-in-VM paths. That is
+retired. Do not implement proot or revive `wwn-qemu-run`.
 
 ## Goal
 
-One Machines kind `container`, shared OCI management, two iOS-family **run**
-backends:
+One Machines kind `container`. OCI unpack, then the **same** Linux VM backend
+as `virtual_machine` (`relay-vm`). Guest GUI is Wayland into Wawona
+(`wawona-guest-wayland-iland`).
 
-| Mode | Run backend | Distribution |
-|------|-------------|--------------|
-| **A** (App Store) | container-in-VM on **jitless** UTM-SE / QEMU-TCTI (`wwn-vms` A) | Store IPA |
-| **B** (TrollStore / Sileo) | container-in-VM on **JIT** UTM (`wwn-vms` B) | TrollStore `.tipa` or Sileo Mode B IPA |
+| Platform | Mode A engine | Mode B / privileged |
+|----------|---------------|---------------------|
+| **macOS** | Apple Containerization via Relay (OCI on VZ) | Same plus desktop-host paths |
+| **iOS / iPadOS** | Relay static / jitless CPU. Tipa proof: OCI tint on same SHM frame | Same Relay plus Mode B JIT CPU when MAP_JIT write+exec works |
+| **Android** | Relay static CPU. Planned. Fail closed | Root / privileged Relay. Planned |
+| **Linux** | Same KVM VM backend as `virtual_machine` | N/A |
+| **tvOS / watchOS / visionOS** | Forbidden | Forbidden |
 
-macOS Mode A/B: Apple Containerization on direct/notarized macOS; image mgmt
-only under MAS. Android: container-in-VM and/or rootless proot (Play-safe);
-root Mode B optional later.
+Mode A vs Mode B is which binary was installed, not a Settings toggle.
 
-## Shared substrate (both modes)
+## Shared
 
-- `wwn-oci`: pull / verify / CAS / unpack (Docker Hub, etc.). **Mode A safe**
-- `container` CLI surface (image mgmt everywhere execution is gated)
-- Machine profile `container` + Settings
-- In-guest runtime concept (crun/podman) living **inside** the VM engine of the
-  active mode
-
-## Mode A implementation
-
-1. Image pull works on all targets including watchOS (mgmt only).
-2. iOS/iPadOS **run** = start jitless VM from `wwn-vms` Mode A, mount/unpack
-   rootfs, run crun in-guest, then connect waypipe/vsock to Wawona.
-3. CI: store artifact links only Mode A VM engine; no JIT container path.
-4. Review Notes: “OCI image data + in-app interpreter VM; no JIT.”
-
-## Mode B implementation
-
-1. Same OCI pull; **run** uses JIT VM engine from Mode B IPA.
-2. Faster containers; may integrate with host jailbreak tooling where useful.
-3. Packaged in the separate TrollStore `.tipa` and Sileo Mode B IPA.
-4. Must not appear in App Store binary (link/strip/flavor).
+- Machine profile schema (`container`)
+- `relay-oci` prepare (userspace unpack). Never proot, never host Docker
+- Slim NixOS / proof rootfs. Embed in the iOS tipa only after Relay frames
+- vsock + waypipe into Wawona iland. IOMFB on TrollStore Mode B
+- Capability gates. tvOS / watchOS / visionOS stay forbidden
 
 ## Relation to Wasm packages
 
 `wpm` / `repo.wawona.io/wasm` installs **WASI modules for Wawona Runtime**.
-That is **not** `container pull`. Both exist under Mode A; Mode B adds jailbreak
-APT for native tweaks. Do not merge indexes.
+That is **not** `container pull`. Both exist under Mode A. Mode B tipa may
+JIT-execute the same `/wasm/v1` bytecode later; there is no Mode B wasm catalog.
 
 ## Never
 
-- `wpm install` meaning Docker Hub Linux images.
-- Shipping JIT container-in-VM in the App Store IPA.
-- Faking execution on watchOS / MAS.
-
-## Phases
-
-| Phase | Work |
-|-------|------|
-| 1 | OCI pull solid on iOS Mode A; run stub clear errors |
-| 2 | Mode A container-in-VM e2e (jitless) |
-| 3 | Mode B JIT run path + TrollStore/Sileo wiring |
-| 4 | Docker Hub demo image documented for both modes |
-
-## Parity status (2026-08)
-
-| Item | Status |
-|------|--------|
-| Prebaked `wawona-container-desktop` flake package | done (`.#packages.aarch64-linux.wawona-container-desktop`; Wawona recipes use plain entry + `--image-archive`) |
-| Guest OCI share | 9p mount_tag `oci-bundle` (QEMU `-virtfs`) |
-| Mode A run path | `WWNContainerRunner` to staged bundle to `WWNMobileVmEngine` TCG |
-
-## Success
-
-- Mode A: `container pull` + run alpine-class image via jitless VM.
-- Mode B: same UX with the JIT engine in TrollStore and Sileo builds.
-- Store binary contains zero Mode B container engine.
+- QEMU, TCTI, UTM, Spice, virgl, or `wwn-qemu-run`
+- proot or host Docker as a product container backend
+- Mode B engine inside an App Store IPA behind a toggle
+- Container machine kind on tvOS / watchOS / visionOS
+- Document container frames as done before Relay presents on that artifact

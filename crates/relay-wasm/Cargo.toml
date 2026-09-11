@@ -6,4 +6,6 @@ license.workspace = true
 description = "Mode A WASI path. Pulley on Apple mobile, Cranelift on macOS/Linux"
 
 [dependencies]
+libc = "0.2"
 relay-core = { path = "../relay-core" }
+wasmparser = "0.240"

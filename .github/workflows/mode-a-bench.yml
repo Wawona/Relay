@@ -1,0 +1,66 @@
+name: Mode A bench
+
+on:
+  push:
+    branches: [development, master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  bench:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Restore prior streak
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          if gh release download bench-latest -p streak.json -O artifacts/streak.prev.json 2>/dev/null; then
+            echo "restored streak from bench-latest"
+          else
+            echo '{"schemaVersion":1,"consecutivePass":0}' > artifacts/streak.prev.json
+            echo "no prior streak; starting at 0"
+          fi
+
+      - name: Mode A bench
+        run: |
+          nix run path:.#relay-mode-a-bench -- \
+            --out artifacts \
+            --streak-in artifacts/streak.prev.json \
+            --strict-competitors
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mode-a-bench
+          path: artifacts/
+
+      - name: Publish bench-latest release assets
+        if: github.ref == 'refs/heads/development' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view bench-latest >/dev/null 2>&1; then
+            gh release create bench-latest --title "Mode A bench (live)" --notes "Floating assets for README embeds. Clobbered each run. Not a product release." --target "$GITHUB_SHA"
+          fi
+          gh release upload bench-latest \
+            artifacts/mode-a-interpreters.svg \
+            artifacts/mode-a-page-geom.svg \
+            artifacts/cross-class-incl-jit-utm.svg \
+            artifacts/results.json \
+            artifacts/gate.json \
+            artifacts/streak.json \
+            artifacts/marketing.json \
+            artifacts/SUMMARY.md \
+            --clobber

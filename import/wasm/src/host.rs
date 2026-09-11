@@ -230,17 +230,53 @@ fn socket_send(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, b
     write_i32(data_mut, sent_out, n as i32)
 }
 
-fn socket_recv(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, buf: u32, len: u32, recv_out: u32) -> i32 {
-    let mut tmp = vec![0u8; len as usize];
-    let n = {
-        let mut table = socks().lock().unwrap_or_else(|e| e.into_inner());
-        match table.map.get_mut(&fd) {
-            Some(Sock::Tcp(s)) => s.read(&mut tmp).unwrap_or(0),
-            Some(Sock::Unix(s)) => s.read(&mut tmp).unwrap_or(0),
-            Some(Sock::Udp(s)) => s.recv(&mut tmp).unwrap_or(0),
-            _ => return EBADF,
+/// Wake blocking guest I/O and drop Wayland connections so Smithay
+/// `client_disconnected` closes GUI toplevels. Called from Ctrl+C.
+pub fn shutdown_guest_sockets() {
+    use std::net::Shutdown;
+    let table = socks().lock().unwrap_or_else(|e| e.into_inner());
+    for sock in table.map.values() {
+        match sock {
+            Sock::Unix(s) => {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+            Sock::Tcp(s) => {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+            Sock::Udp(_) | Sock::TcpListen(_) | Sock::File(_) => {}
         }
+    }
+}
+
+fn socket_raw_fd(fd: i32) -> Result<RawFd, i32> {
+    let table = socks().lock().unwrap_or_else(|e| e.into_inner());
+    match table.map.get(&fd) {
+        Some(Sock::Tcp(s)) => Ok(s.as_raw_fd()),
+        Some(Sock::Unix(s)) => Ok(s.as_raw_fd()),
+        Some(Sock::Udp(s)) => Ok(s.as_raw_fd()),
+        _ => Err(EBADF),
+    }
+}
+
+fn socket_recv(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, buf: u32, len: u32, recv_out: u32) -> i32 {
+    if crate::interrupt::is_set() {
+        return EIO;
+    }
+    // Do not hold SOCKS across a blocking read. Ctrl+C shuts the fd from
+    // the PTY thread and must not deadlock on this mutex.
+    let raw = match socket_raw_fd(fd) {
+        Ok(fd) => fd,
+        Err(e) => return e,
     };
+    let mut tmp = vec![0u8; len as usize];
+    let n = unsafe { libc::read(raw, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len()) };
+    if crate::interrupt::is_set() {
+        return EIO;
+    }
+    if n < 0 {
+        return EIO;
+    }
+    let n = n as usize;
     let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return EIO,
@@ -295,22 +331,12 @@ fn wayland_shm_create(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, siz
     if size <= 0 {
         return EINVAL;
     }
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| default_xdg_runtime_dir());
-    let path = format!("{dir}/wwn-wasm-shm-{}-{}", std::process::id(), size);
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-    {
+    // Prefer POSIX shm: same-process Wayland SCM_RIGHTS on iOS often cannot
+    // keep an unlinked sandbox tmp path mapped after remove_file.
+    let file = match open_anon_shm(size as u64) {
         Ok(f) => f,
         Err(_) => return EIO,
     };
-    if file.set_len(size as u64).is_err() {
-        return EIO;
-    }
-    let _ = std::fs::remove_file(&path);
     let mut table = socks().lock().unwrap_or_else(|e| e.into_inner());
     let fd = table.insert(Sock::File(file));
     drop(table);
@@ -318,6 +344,50 @@ fn wayland_shm_create(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, siz
         Ok(mem) => write_i32(mem, fd_out, fd),
         Err(e) => e,
     }
+}
+
+fn open_anon_shm(size: u64) -> std::io::Result<std::fs::File> {
+    use std::os::unix::io::FromRawFd;
+    // shm_open + immediate unlink keeps a live inode for SCM_RIGHTS.
+    let name = format!(
+        "/wwn-wasm-{}-{}-{}",
+        std::process::id(),
+        size,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let cname = std::ffi::CString::new(name).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "shm name")
+    })?;
+    let raw = unsafe {
+        libc::shm_open(
+            cname.as_ptr(),
+            libc::O_CREAT | libc::O_RDWR | libc::O_EXCL,
+            0o600,
+        )
+    };
+    if raw >= 0 {
+        unsafe {
+            let _ = libc::shm_unlink(cname.as_ptr());
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(raw) };
+        file.set_len(size)?;
+        return Ok(file);
+    }
+    // Fallback: XDG_RUNTIME_DIR file (when shm_open is denied).
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| default_xdg_runtime_dir());
+    let path = format!("{dir}/wwn-wasm-shm-{}-{}", std::process::id(), size);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)?;
+    file.set_len(size)?;
+    let _ = std::fs::remove_file(&path);
+    Ok(file)
 }
 
 fn wayland_shm_write(

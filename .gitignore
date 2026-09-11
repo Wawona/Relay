@@ -1,5 +1,7 @@
-/target
+
+.DS_Store
+.direnv
 /result
 /result-*
-.direnv
-.DS_Store
+/target
+relay-vm-state*

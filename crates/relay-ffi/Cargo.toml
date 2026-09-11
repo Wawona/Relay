@@ -15,3 +15,7 @@ relay-oci = { path = "../relay-oci" }
 relay-vm = { path = "../relay-vm" }
 relay-wasm = { path = "../relay-wasm" }
 serde_json = "1"
+
+[features]
+default = []
+ios-hv = ["relay-core/ios-hv", "relay-vm/ios-hv"]

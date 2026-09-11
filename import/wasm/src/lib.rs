@@ -3,18 +3,39 @@
 
 pub mod ffi;
 pub mod host;
+pub mod interrupt;
 pub mod p1;
 pub mod p2;
 pub mod sandbox;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
+use std::sync::OnceLock;
 use wasmtime::{Config, Engine};
 
-fn engine() -> Result<Engine> {
+/// Process-wide Wasmtime engine. Mode A Pulley cold-starts must reuse this
+/// across Machines Start / shell `wasm` (and Module/Linker caches below).
+fn shared_engine() -> Result<&'static Engine> {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    if let Some(engine) = ENGINE.get() {
+        return Ok(engine);
+    }
+    let engine = build_engine()?;
+    Ok(ENGINE.get_or_init(|| engine))
+}
+
+/// True when `engine` is the process-wide Mode A engine (safe for Module/Linker cache).
+pub fn is_shared_engine(engine: &Engine) -> bool {
+    shared_engine()
+        .map(|shared| std::ptr::eq(engine, shared))
+        .unwrap_or(false)
+}
+
+fn build_engine() -> Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.consume_fuel(true);
+    config.epoch_interruption(true);
     // Apple mobile / default: Pulley interpreter. Cranelift native is a
     // macOS-only feature and must never be compiled into iphoneos slices.
     #[cfg(feature = "pulley")]
@@ -28,6 +49,25 @@ fn engine() -> Result<Engine> {
     Engine::new(&config).context("wasmtime Engine")
 }
 
+/// Backend label for benches and logs. Mode A Apple mobile is always Pulley.
+pub fn backend_name() -> &'static str {
+    #[cfg(feature = "pulley")]
+    {
+        "pulley64"
+    }
+    #[cfg(all(feature = "cranelift-native", not(feature = "pulley")))]
+    {
+        "cranelift-native"
+    }
+    #[cfg(not(any(
+        feature = "pulley",
+        all(feature = "cranelift-native", not(feature = "pulley"))
+    )))]
+    {
+        "unknown"
+    }
+}
+
 pub fn run_args(args: &[String]) -> Result<i32> {
     let path = ffi::path_from_c_args(args).context("usage: wasm <file.wasm|package> [args…]")?;
     let path = resolve_wasm_path(&path)?;
@@ -37,7 +77,11 @@ pub fn run_args(args: &[String]) -> Result<i32> {
     if !sandbox::is_wasm_magic(&path) {
         bail!("{} is not a WASM module (missing \\0asm magic)", path.display());
     }
-    let guest_args = if args.first().map(|s| s == "wasm" || s.ends_with("/wasm")).unwrap_or(false) {
+    let guest_args = if args
+        .first()
+        .map(|s| s == "wasm" || s.ends_with("/wasm"))
+        .unwrap_or(false)
+    {
         args[1..].to_vec()
     } else {
         args.to_vec()
@@ -69,9 +113,14 @@ fn resolve_wasm_path(path: &Path) -> Result<std::path::PathBuf> {
 }
 
 pub fn run_path(path: &Path, args: &[String]) -> Result<i32> {
-    let engine = engine()?;
+    let engine = shared_engine()?;
+    run_path_with_engine(engine, path, args)
+}
+
+/// Same as [`run_path`], but uses a caller-owned engine (benches / cold path).
+pub fn run_path_with_engine(engine: &Engine, path: &Path, args: &[String]) -> Result<i32> {
     if sandbox::looks_like_component(path) {
-        match p2::run(&engine, path, args) {
+        match p2::run(engine, path, args) {
             Ok(code) => return Ok(code),
             Err(e) => {
                 // Fall back to P1 if the component parser rejected a core module
@@ -80,5 +129,10 @@ pub fn run_path(path: &Path, args: &[String]) -> Result<i32> {
             }
         }
     }
-    p1::run(&engine, path, args)
+    p1::run(engine, path, args)
+}
+
+/// Build a fresh engine (cold-start baseline for Mode A benches).
+pub fn new_engine_for_bench() -> Result<Engine> {
+    build_engine()
 }

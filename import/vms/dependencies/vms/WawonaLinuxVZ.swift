@@ -348,6 +348,29 @@ func run() {
 
     guard let vm = vmRef else { die("failed to construct VM") }
 
+    // Rust owns lifecycle and sends SIGTERM. Translate it into the framework's
+    // guest stop request so systemd can shut down before Rust escalates.
+    signal(SIGTERM, SIG_IGN)
+    signal(SIGINT, SIG_IGN)
+    let terminationSignals = [SIGTERM, SIGINT].map { signalNumber in
+        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: queue)
+        source.setEventHandler {
+            if vm.canRequestStop {
+                do {
+                    try vm.requestStop()
+                    log("requested guest shutdown")
+                } catch {
+                    log("guest shutdown request failed: \(error.localizedDescription)")
+                    exit(1)
+                }
+            } else {
+                exit(0)
+            }
+        }
+        source.resume()
+        return source
+    }
+
     queue.async {
         vm.start { result in
             switch result {
@@ -361,7 +384,9 @@ func run() {
     }
 
     // VZ drives callbacks on the main run loop.
-    dispatchMain()
+    withExtendedLifetime(terminationSignals) {
+        dispatchMain()
+    }
 }
 
 @available(macOS 13.0, *)
