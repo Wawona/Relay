@@ -5,7 +5,6 @@ mod cpu;
 mod dtb;
 mod exception;
 mod guest;
-mod ios_cpu;
 mod linux_boot;
 mod mmu;
 pub mod page_translate;
