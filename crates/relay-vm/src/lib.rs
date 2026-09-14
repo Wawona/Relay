@@ -1,11 +1,15 @@
 //! Linux VM start/stop. Containers always sit on this backend.
 
+mod bus;
+mod cpu;
 mod dtb;
 mod exception;
 mod guest;
 mod ios_cpu;
+mod linux_boot;
 mod mmu;
 pub mod page_translate;
+mod sysregs;
 mod timer;
 mod virtio_block;
 mod virtio_console;
@@ -93,32 +97,25 @@ pub fn start(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
 }
 
 fn start_ios(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
-    if let Some(manifest) = &spec.guest {
-        let resources = spec.resources.as_ref().ok_or_else(|| {
-            RelayError::Failed("Relay guest trust configuration is missing".into())
-        })?;
-        manifest.verify_trust(
-            &resources.trusted_guest_keys,
-            resources.allow_unsigned_guest,
-        )?;
-        // Validate and load artifacts now, but fail closed until this CPU has
-        // the Linux boot/MMU/device implementation. Never render the proof
-        // frame and call it a NixOS boot.
-        guest::validate_artifacts(manifest)?;
-        return Err(RelayError::Planned(
-            "Relay validated the NixOS guest; static Linux boot is not implemented yet",
+    if !matches!(spec.kind, RelayKind::Vm | RelayKind::Container) {
+        return Err(RelayError::Failed(
+            "static CPU is a guest-machine backend".into(),
         ));
     }
-    let session = ios_cpu::start(spec)?;
-    Ok(RelayHandle {
-        id: session.id,
-        backend: session.backend,
-        kind: session.kind,
-        wayland_endpoint: Some(session.wayland_endpoint),
-        frame: Some(session.frame),
-        frame_width: session.width,
-        frame_height: session.height,
-    })
+    let manifest = spec.guest.as_ref().ok_or_else(|| {
+        RelayError::Failed("Relay VM/container start requires a guest manifest".into())
+    })?;
+    let resources = spec
+        .resources
+        .as_ref()
+        .ok_or_else(|| RelayError::Failed("Relay guest trust configuration is missing".into()))?;
+    manifest.verify_trust(
+        &resources.trusted_guest_keys,
+        resources.allow_unsigned_guest,
+    )?;
+    guest::validate_artifacts(manifest)?;
+    linux_boot::prepare(manifest)?;
+    unreachable!("linux_boot::prepare reports execution state or an error")
 }
 
 fn start_ios_hv(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
@@ -612,6 +609,24 @@ mod tests {
             ios_hv_host: None,
         };
         assert!(matches!(start(&spec), Err(RelayError::Failed(_))));
+    }
+
+    #[test]
+    fn static_cpu_vm_without_guest_never_returns_proof_frame() {
+        let spec = RelaySpec {
+            kind: RelayKind::Vm,
+            platform: RelayPlatform::Ios,
+            artifact: ArtifactClass::ModeA,
+            machine_id: None,
+            image: None,
+            memory_mb: None,
+            guest_page_size: Some(4096),
+            guest: None,
+            resources: None,
+            ios_hv_host: None,
+        };
+        let error = start(&spec).unwrap_err();
+        assert!(error.to_string().contains("requires a guest manifest"));
     }
 
     #[test]

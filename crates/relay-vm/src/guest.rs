@@ -41,7 +41,23 @@ const KERNEL_ADDRESS: u64 = 0x80000;
 pub fn prepare_linux_boot(
     manifest: &GuestManifest,
 ) -> Result<(LoadedGuest, LinuxBootState), RelayError> {
-    let mut guest = load(manifest)?;
+    // The immutable rootfs is a virtio-block backing store, never a second
+    // in-RAM copy.  Verify it before allocating RAM, then stage only the
+    // executable boot artifacts into the single GuestMemory arena.
+    let page_size = validate_artifacts(manifest)?;
+    let mut guest = LoadedGuest {
+        page_size,
+        memory: GuestMemory::allocate(page_size, manifest.memory_bytes)?,
+        kernel: read_artifact("kernel", &manifest.kernel)?,
+        initrd: manifest
+            .initrd
+            .as_ref()
+            .map(|artifact| read_artifact("initrd", artifact))
+            .transpose()?,
+        // `start_ios` attaches this verified artifact through virtio-block.
+        // Keeping it empty here prevents a rootfs-sized duplicate allocation.
+        rootfs: Vec::new(),
+    };
     let kernel_end = KERNEL_ADDRESS
         .checked_add(guest.kernel.len() as u64)
         .ok_or_else(|| RelayError::Failed("guest kernel placement overflow".into()))?;
@@ -415,6 +431,7 @@ mod tests {
             .read(KERNEL_ADDRESS, &mut loaded_kernel)
             .unwrap();
         assert_eq!(loaded_kernel, [1, 2, 3, 4]);
+        assert!(guest.rootfs.is_empty(), "rootfs is virtio-block backed");
         fs::remove_dir_all(dir).unwrap();
     }
 }

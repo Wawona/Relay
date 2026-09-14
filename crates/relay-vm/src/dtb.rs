@@ -96,6 +96,15 @@ pub fn build(
     prop_empty(&mut st, &mut strings, "always-on");
     end_node(&mut st);
 
+    // Early printk before virtio-console is available.  The StaticCpu bus
+    // exposes this fixed PL011 window as required by the boot arguments.
+    node(&mut st, "pl011@9000000");
+    prop_str(&mut st, &mut strings, "compatible", "arm,pl011");
+    prop_cells(&mut st, &mut strings, "reg", &[0, 0x0900_0000, 0, 0x1000]);
+    prop_cells(&mut st, &mut strings, "interrupts", &[0, 33, 4]);
+    prop_u32(&mut st, &mut strings, "clock-frequency", 24_000_000);
+    end_node(&mut st);
+
     node(&mut st, "virtio_mmio@a000000");
     prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
     prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_0000, 0, 0x1000]);
@@ -197,6 +206,7 @@ mod tests {
             b"arm,arm-v8",
             b"arm,gic-v3",
             b"arm,armv8-timer",
+            b"arm,pl011",
             b"virtio,mmio",
             b"linux,initrd-start",
         ] {
