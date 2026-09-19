@@ -309,6 +309,56 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // ADD/SUB shifted register, including CMP. Register 31 is XZR in this
+        // encoding (unlike the immediate form, where it can denote SP).
+        if insn & 0x1f20_0000 == 0x0b00_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let mask = low_mask(width);
+            let amount = (insn >> 10) & 63;
+            if !is_64 && amount >= 32 {
+                return self.unsupported(pc, insn);
+            }
+            let source = self.x((insn >> 16) & 31) & mask;
+            let right = match (insn >> 22) & 3 {
+                0 => source << amount,
+                1 => source >> amount,
+                2 => {
+                    if is_64 {
+                        ((source as i64) >> amount) as u64
+                    } else {
+                        ((source as u32 as i32) >> amount) as u32 as u64
+                    }
+                }
+                _ => return self.unsupported(pc, insn),
+            } & mask;
+            let left = self.x((insn >> 5) & 31) & mask;
+            let subtract = insn & (1 << 30) != 0;
+            let result = if subtract {
+                left.wrapping_sub(right)
+            } else {
+                left.wrapping_add(right)
+            } & mask;
+            self.set(insn & 31, result);
+            if insn & (1 << 29) != 0 {
+                let sign = width - 1;
+                let n = result >> sign != 0;
+                let z = result == 0;
+                let c = if subtract {
+                    left >= right
+                } else {
+                    u128::from(left) + u128::from(right) > u128::from(mask)
+                };
+                let v = if subtract {
+                    (((left ^ right) & (left ^ result)) >> sign) != 0
+                } else {
+                    ((!(left ^ right) & (left ^ result)) >> sign) != 0
+                };
+                self.nzcv = (n as u8) << 3 | (z as u8) << 2 | (c as u8) << 1 | v as u8;
+            }
+            self.pc = next;
+            return Ok(());
+        }
         // AND/ORR/EOR/ANDS immediate. Linux uses the TST alias here while
         // selecting its early exception-level and cache path.
         if insn & 0x1f80_0000 == 0x1200_0000 {
@@ -576,6 +626,14 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // Guest cache maintenance is synchronous on Relay's coherent backing
+        // arena. Linux's early IVAC/CIVAC operations therefore need no host
+        // cache action, but remain explicit rather than accepting arbitrary
+        // SYS instructions.
+        if matches!(insn & 0xffff_ffe0, 0xd508_7620 | 0xd50b_7e20) {
+            self.pc = next;
+            return Ok(());
+        }
         self.unsupported(pc, insn)
     }
     fn unsupported<T>(&self, pc: u64, word: u32) -> Result<T, RelayError> {
@@ -747,6 +805,29 @@ mod tests {
         cpu.set_x(3, 0x3f);
         cpu.step().unwrap();
         assert_eq!(cpu.x(1), 0x1200);
+    }
+
+    #[test]
+    fn cache_loop_add_compare_and_maintenance_execute() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        for (offset, instruction) in [
+            (0, 0xd50b_7e20_u32),  // DC CIVAC,X0
+            (4, 0xd508_7620_u32),  // DC IVAC,X0
+            (8, 0x8b02_0000_u32),  // ADD X0,X0,X2
+            (12, 0xeb01_001f_u32), // CMP X0,X1
+        ] {
+            memory.write(offset, &instruction.to_le_bytes()).unwrap();
+        }
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(0, 0x1000);
+        cpu.set_x(1, 0x1040);
+        cpu.set_x(2, 0x40);
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(0), 0x1040);
+        cpu.step().unwrap();
+        assert_eq!(cpu.nzcv & 4, 4);
     }
 
     #[test]
