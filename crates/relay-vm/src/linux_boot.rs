@@ -58,7 +58,9 @@ fn parse_image_header(bytes: &[u8]) -> Result<ImageHeader, RelayError> {
 
 /// Verify, stage the Image/DTB/initrd into the one guest RAM arena, and report
 /// a fail-closed instruction boundary until the real EL1 runner accepts it.
-pub fn prepare(manifest: &GuestManifest) -> Result<LinuxBootState, RelayError> {
+pub(crate) fn create_cpu(
+    manifest: &GuestManifest,
+) -> Result<(StaticCpu, LinuxBootState), RelayError> {
     let (guest, boot) = guest::prepare_linux_boot(manifest)?;
     let header = parse_image_header(&guest.kernel)?;
     if header.first_instruction == 0 {
@@ -72,6 +74,11 @@ pub fn prepare(manifest: &GuestManifest) -> Result<LinuxBootState, RelayError> {
     // argument registers are zero on entry.  Follow real Image control flow
     // until a handler is missing; do not return a placeholder frame.
     cpu.set_x(0, boot.dtb_address);
+    Ok((cpu, boot))
+}
+
+pub fn prepare(manifest: &GuestManifest) -> Result<LinuxBootState, RelayError> {
+    let (mut cpu, _) = create_cpu(manifest)?;
     match cpu.run(1_000_000) {
         Err(error) => Err(error),
         Ok(()) => unreachable!("bounded CPU run cannot complete without a stop reason"),

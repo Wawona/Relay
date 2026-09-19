@@ -22,20 +22,22 @@ use relay_core::{
     resolve_backend, GuestArtifact, GuestManifest, RelayBackend, RelayError, RelayKind,
     RelayRuntimeResources, RelaySpec,
 };
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    thread::{self, JoinHandle},
+};
 
 #[cfg(target_os = "macos")]
 use std::{
-    collections::BTreeMap,
     ffi::CString,
     fs::{self, OpenOptions},
     os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -50,6 +52,16 @@ pub const OCI_SHARE_TAG: &str = "oci-bundle";
 
 #[cfg(target_os = "macos")]
 static NEXT_VZ_SESSION: AtomicU64 = AtomicU64::new(1);
+
+static NEXT_STATIC_SESSION: AtomicU64 = AtomicU64::new(1);
+static STATIC_SESSIONS: OnceLock<Mutex<BTreeMap<String, StaticSession>>> = OnceLock::new();
+
+struct StaticSession {
+    stop: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+    console: Arc<Mutex<Vec<u8>>>,
+    thread: JoinHandle<()>,
+}
 
 #[cfg(target_os = "macos")]
 static VZ_SESSIONS: OnceLock<Mutex<BTreeMap<String, VzSession>>> = OnceLock::new();
@@ -87,7 +99,7 @@ pub fn start(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
         RelayBackend::AvfLab => Err(RelayError::Planned(
             "Android AVF is lab/root only. Not wired into Play",
         )),
-        RelayBackend::StaticCpu | RelayBackend::ModeBJit => start_ios(spec),
+        RelayBackend::StaticCpu | RelayBackend::ModeBJit => start_ios(spec, backend),
         RelayBackend::IosHv => start_ios_hv(spec),
         RelayBackend::WasmPulley | RelayBackend::WasmCranelift | RelayBackend::None => {
             Err(RelayError::Failed("vm crate does not start wasm".into()))
@@ -95,7 +107,7 @@ pub fn start(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
     }
 }
 
-fn start_ios(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
+fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, RelayError> {
     if !matches!(spec.kind, RelayKind::Vm | RelayKind::Container) {
         return Err(RelayError::Failed(
             "static CPU is a guest-machine backend".into(),
@@ -112,8 +124,61 @@ fn start_ios(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
         &resources.trusted_guest_keys,
         resources.allow_unsigned_guest,
     )?;
-    linux_boot::prepare(manifest)?;
-    unreachable!("linux_boot::prepare reports execution state or an error")
+    let (mut cpu, _) = linux_boot::create_cpu(manifest)?;
+    let id = format!(
+        "static-{}",
+        NEXT_STATIC_SESSION.fetch_add(1, Ordering::Relaxed)
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(AtomicU8::new(0));
+    let console = Arc::new(Mutex::new(Vec::new()));
+    let thread_stop = Arc::clone(&stop);
+    let thread_state = Arc::clone(&state);
+    let thread_console = Arc::clone(&console);
+    let thread = thread::Builder::new()
+        .name(id.clone())
+        .spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                if let Err(error) = cpu.run_slice(100_000) {
+                    if let Ok(mut output) = thread_console.lock() {
+                        output.clear();
+                        output.extend_from_slice(cpu.console());
+                        output
+                            .extend_from_slice(format!("\nRelay StaticCpu: {error}\n").as_bytes());
+                    }
+                    thread_state.store(2, Ordering::Release);
+                    return;
+                }
+                if let Ok(mut output) = thread_console.lock() {
+                    output.clear();
+                    output.extend_from_slice(cpu.console());
+                }
+            }
+            thread_state.store(1, Ordering::Release);
+        })
+        .map_err(|error| RelayError::Failed(format!("cannot start StaticCpu thread: {error}")))?;
+    STATIC_SESSIONS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?
+        .insert(
+            id.clone(),
+            StaticSession {
+                stop,
+                state,
+                console,
+                thread,
+            },
+        );
+    Ok(RelayHandle {
+        id,
+        backend,
+        kind: spec.kind,
+        wayland_endpoint: None,
+        frame: None,
+        frame_width: 0,
+        frame_height: 0,
+    })
 }
 
 fn start_ios_hv(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
@@ -481,6 +546,19 @@ fn start_kvm(_spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Re
 }
 
 pub fn stop(handle: &str) -> Result<(), RelayError> {
+    if let Some(sessions) = STATIC_SESSIONS.get() {
+        let session = sessions
+            .lock()
+            .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?
+            .remove(handle);
+        if let Some(session) = session {
+            session.stop.store(true, Ordering::Release);
+            return session
+                .thread
+                .join()
+                .map_err(|_| RelayError::Failed("Relay StaticCpu thread panicked".into()));
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         let Some(sessions) = VZ_SESSIONS.get() else {
@@ -503,6 +581,19 @@ pub fn stop(handle: &str) -> Result<(), RelayError> {
 }
 
 pub fn status(handle: &str) -> Result<RelayVmStatus, RelayError> {
+    if let Some(sessions) = STATIC_SESSIONS.get() {
+        if let Some(session) = sessions
+            .lock()
+            .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?
+            .get(handle)
+        {
+            return Ok(if session.state.load(Ordering::Acquire) == 0 {
+                RelayVmStatus::Running
+            } else {
+                RelayVmStatus::Exited
+            });
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         let sessions = VZ_SESSIONS
@@ -536,6 +627,19 @@ pub fn status(handle: &str) -> Result<RelayVmStatus, RelayError> {
 }
 
 pub fn console_log(handle: &str) -> Result<Vec<u8>, RelayError> {
+    if let Some(sessions) = STATIC_SESSIONS.get() {
+        if let Some(session) = sessions
+            .lock()
+            .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?
+            .get(handle)
+        {
+            return session
+                .console
+                .lock()
+                .map(|output| output.clone())
+                .map_err(|_| RelayError::Failed("Relay StaticCpu console is poisoned".into()));
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         let sessions = VZ_SESSIONS

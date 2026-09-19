@@ -157,14 +157,21 @@ impl StaticCpu {
     }
 
     pub(crate) fn run(&mut self, budget: u64) -> Result<(), RelayError> {
-        for _ in 0..budget {
-            self.step()?;
-            self.sysregs.tick(1);
-        }
+        self.run_slice(budget)?;
         Err(RelayError::Failed(format!(
             "StaticCpu instruction budget exhausted at pc={:#x}",
             self.pc
         )))
+    }
+    pub(crate) fn run_slice(&mut self, budget: u64) -> Result<(), RelayError> {
+        for _ in 0..budget {
+            self.step()?;
+            self.sysregs.tick(1);
+        }
+        Ok(())
+    }
+    pub(crate) fn console(&self) -> &[u8] {
+        self.bus.console()
     }
     pub(crate) fn step(&mut self) -> Result<(), RelayError> {
         let pc = self.pc;
