@@ -122,6 +122,13 @@ impl StaticCpu {
             .word()
             .map_err(|e| RelayError::Failed(format!("{e}; pc={pc:#x}")))?;
         let next = pc.wrapping_add(4);
+        // Linux's ARM64 Image begins with the PE/COFF "MZ" signature encoded
+        // as an architecturally harmless conditional compare. Treat only this
+        // exact header instruction as a no-op before the branch at Image+4.
+        if insn == 0xfa40_5a4d {
+            self.pc = next;
+            return Ok(());
+        }
         // B/BL imm26.
         if insn & 0x7c00_0000 == 0x1400_0000 {
             let imm = sign_extend((insn & 0x03ff_ffff) as u64, 26) << 2;
@@ -463,10 +470,13 @@ mod tests {
     #[test]
     fn follows_image_branch_before_reporting_unknown_word() {
         let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
-        memory.write(0, &0x1400_0002u32.to_le_bytes()).unwrap();
+        memory.write(0, &0xfa40_5a4du32.to_le_bytes()).unwrap();
+        memory.write(4, &0x1400_0001u32.to_le_bytes()).unwrap();
         memory.write(8, &0xd503_201fu32.to_le_bytes()).unwrap();
         memory.write(12, &0xffff_ffffu32.to_le_bytes()).unwrap();
         let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc, 4);
         cpu.step().unwrap();
         assert_eq!(cpu.pc, 8);
         cpu.step().unwrap();
