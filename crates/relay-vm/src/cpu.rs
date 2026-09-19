@@ -752,6 +752,14 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // DC ZVA materially clears one cache block; Linux uses it as a fast
+        // zeroing primitive for page-table and page initialization.
+        if insn & 0xffff_ffe0 == 0xd50b_7420 {
+            let address = self.x(insn & 31) & !63;
+            self.memory.write(self.physical(address)?, &[0; 64])?;
+            self.pc = next;
+            return Ok(());
+        }
         // Relay performs page-table walks directly and has no cached TLB.
         if matches!(insn, 0xd508_871f | 0xd508_751f) {
             self.pc = next;
@@ -979,6 +987,19 @@ mod tests {
         assert_eq!(cpu.nzcv & 4, 4);
         cpu.step().unwrap();
         assert_eq!(cpu.pc, 20);
+    }
+
+    #[test]
+    fn cache_zero_clears_a_64_byte_block() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xd50b_7428u32.to_le_bytes()).unwrap(); // DC ZVA,X8
+        memory.write(0x100, &[0xff; 64]).unwrap();
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(8, 0x123);
+        cpu.step().unwrap();
+        let mut cleared = [1; 64];
+        cpu.memory.read(0x100, &mut cleared).unwrap();
+        assert_eq!(cleared, [0; 64]);
     }
 
     #[test]
