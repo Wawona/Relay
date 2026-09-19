@@ -18,6 +18,7 @@ pub(crate) const ID_AA64ISAR1_EL1: u16 = 0xc031;
 pub(crate) const ID_AA64MMFR0_EL1: u16 = 0xc038;
 pub(crate) const ID_AA64MMFR1_EL1: u16 = 0xc039;
 pub(crate) const ID_AA64MMFR2_EL1: u16 = 0xc03a;
+pub(crate) const ID_AA64MMFR3_EL1: u16 = 0xc03b;
 pub(crate) const MDSCR_EL1: u16 = 0x8012;
 pub(crate) const CURRENT_EL: u16 = 0xc212;
 pub(crate) const SPSR_EL1: u16 = 0xc200;
@@ -83,7 +84,7 @@ impl SysRegs {
             ID_AA64ISAR0_EL1 | ID_AA64ISAR1_EL1 => Ok(0),
             // 48-bit physical addresses; baseline 4 KiB translation granule.
             ID_AA64MMFR0_EL1 => Ok(5),
-            ID_AA64MMFR1_EL1 | ID_AA64MMFR2_EL1 => Ok(0),
+            ID_AA64MMFR1_EL1 | ID_AA64MMFR2_EL1 | ID_AA64MMFR3_EL1 => Ok(0),
             MDSCR_EL1 => Ok(self.mdscr_el1),
             CURRENT_EL => Ok(1 << 2),
             SPSR_EL1 => Ok(self.spsr_el1),
@@ -119,7 +120,7 @@ impl SysRegs {
             }
             CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 | ID_AA64DFR0_EL1
             | ID_AA64ISAR0_EL1 | ID_AA64ISAR1_EL1 | ID_AA64MMFR0_EL1 | ID_AA64MMFR1_EL1
-            | ID_AA64MMFR2_EL1 | CURRENT_EL | CTR_EL0 | DCZID_EL0 => {
+            | ID_AA64MMFR2_EL1 | ID_AA64MMFR3_EL1 | CURRENT_EL | CTR_EL0 | DCZID_EL0 => {
                 return Err(RelayError::Failed(
                     "StaticCpu attempted write to read-only system register".into(),
                 ))
