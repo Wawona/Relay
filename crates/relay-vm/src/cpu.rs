@@ -14,6 +14,7 @@ pub(crate) struct StaticCpu {
     pub(crate) pc: u64,
     memory: GuestMemory,
     bus: Bus,
+    exclusive: Option<(u64, u8)>,
     pub(crate) sysregs: SysRegs,
 }
 
@@ -36,6 +37,7 @@ impl StaticCpu {
             pc: entry_pc,
             memory,
             bus,
+            exclusive: None,
             sysregs: SysRegs::new(24_000_000)?,
         })
     }
@@ -991,6 +993,39 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // LDXR/LDAXR and STXR/STLXR. A single-vCPU Relay session has no
+        // competing observer, but still tracks the exclusive address and size
+        // so malformed or mismatched store-exclusive operations fail.
+        if insn & 0x3f5f_7c00 == 0x085f_7c00 {
+            let bytes = if insn & 0x4000_0000 != 0 { 8 } else { 4 };
+            let address = self.x_or_sp((insn >> 5) & 31);
+            let physical = self.physical(address)?;
+            let value = if bytes == 8 {
+                self.read64(address)?
+            } else {
+                self.read32(address)? as u64
+            };
+            self.set(insn & 31, value);
+            self.exclusive = Some((physical, bytes));
+            self.pc = next;
+            return Ok(());
+        }
+        if insn & 0x3f20_7c00 == 0x0800_7c00 {
+            let bytes = if insn & 0x4000_0000 != 0 { 8 } else { 4 };
+            let address = self.x_or_sp((insn >> 5) & 31);
+            let physical = self.physical(address)?;
+            let succeeds = self.exclusive.take() == Some((physical, bytes));
+            if succeeds {
+                if bytes == 8 {
+                    self.write64(address, self.x(insn & 31))?;
+                } else {
+                    self.write32(address, self.x(insn & 31) as u32)?;
+                }
+            }
+            self.set((insn >> 16) & 31, u64::from(!succeeds));
+            self.pc = next;
+            return Ok(());
+        }
         // Architectural hints including NOP, YIELD, WFE and SEV are safe
         // cooperative no-ops in this single-vCPU executor.
         if insn & 0xffff_f01f == 0xd503_201f {
@@ -1413,6 +1448,24 @@ mod tests {
         cpu.memory.read(0x140, &mut stored).unwrap();
         assert_eq!(&stored[..4], &0xfeed_faceu32.to_le_bytes());
         assert_eq!(&stored[4..], &[0; 4]);
+    }
+
+    #[test]
+    fn exclusive_word_update_succeeds_on_single_vcpu() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x885f_7c90u32.to_le_bytes()).unwrap(); // LDXR W16,[X4]
+        memory.write(4, &0x8811_7c90u32.to_le_bytes()).unwrap(); // STXR W17,W16,[X4]
+        memory.write(0x100, &7u32.to_le_bytes()).unwrap();
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(4, 0x100);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(16), 7);
+        cpu.set_x(16, 8);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(17), 0);
+        let mut stored = [0; 4];
+        cpu.memory.read(0x100, &mut stored).unwrap();
+        assert_eq!(u32::from_le_bytes(stored), 8);
     }
 
     #[test]
