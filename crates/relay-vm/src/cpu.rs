@@ -286,6 +286,45 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // CCMP/CCMN register and immediate. When the condition is false the
+        // encoded NZCV literal is installed without evaluating operands.
+        if insn & 0x1fe0_0000 == 0x1a40_0000 {
+            if self.condition_holds((insn >> 12) & 15) {
+                let is_64 = insn & 0x8000_0000 != 0;
+                let width = if is_64 { 64 } else { 32 };
+                let mask = low_mask(width);
+                let left = self.x((insn >> 5) & 31) & mask;
+                let right = if insn & (1 << 11) != 0 {
+                    ((insn >> 16) & 31) as u64
+                } else {
+                    self.x((insn >> 16) & 31) & mask
+                };
+                let subtract = insn & (1 << 30) != 0;
+                let result = if subtract {
+                    left.wrapping_sub(right)
+                } else {
+                    left.wrapping_add(right)
+                } & mask;
+                let sign = width - 1;
+                let n = result >> sign != 0;
+                let z = result == 0;
+                let c = if subtract {
+                    left >= right
+                } else {
+                    u128::from(left) + u128::from(right) > u128::from(mask)
+                };
+                let v = if subtract {
+                    (((left ^ right) & (left ^ result)) >> sign) != 0
+                } else {
+                    ((!(left ^ right) & (left ^ result)) >> sign) != 0
+                };
+                self.nzcv = (n as u8) << 3 | (z as u8) << 2 | (c as u8) << 1 | v as u8;
+            } else {
+                self.nzcv = (insn & 15) as u8;
+            }
+            self.pc = next;
+            return Ok(());
+        }
         // TBZ/TBNZ. The high bit of the tested bit index is also the
         // instruction's width selector.
         if insn & 0x7e00_0000 == 0x3600_0000 {
@@ -854,6 +893,21 @@ mod tests {
         cpu.step().unwrap();
         assert_eq!(cpu.pc, 12);
         assert!(cpu.step().unwrap_err().to_string().contains("pc=0xc"));
+    }
+
+    #[test]
+    fn conditional_compare_uses_encoded_or_computed_flags() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xfa4f_1824u32.to_le_bytes()).unwrap(); // CCMP X1,#15,#4,NE
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.nzcv = 4;
+        cpu.step().unwrap();
+        assert_eq!(cpu.nzcv, 4);
+        cpu.pc = 0;
+        cpu.nzcv = 0;
+        cpu.set_x(1, 15);
+        cpu.step().unwrap();
+        assert_eq!(cpu.nzcv & 4, 4);
     }
 
     #[test]
