@@ -2,16 +2,26 @@ use relay_core::{
     ArtifactClass, GuestArtifact, GuestManifest, RelayKind, RelayPlatform, RelayRuntimeResources,
     RelaySpec,
 };
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::PathBuf,
+    thread,
+    time::{Duration, Instant},
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os().skip(1);
     let guest_directory = arguments
         .next()
         .map(PathBuf::from)
-        .ok_or("usage: static_smoke GUEST_DIRECTORY")?;
+        .ok_or("usage: static_smoke GUEST_DIRECTORY [SECONDS]")?;
+    let seconds = arguments
+        .next()
+        .map(|value| value.to_string_lossy().parse::<u64>())
+        .transpose()?
+        .unwrap_or(5);
     if arguments.next().is_some() {
-        return Err("usage: static_smoke GUEST_DIRECTORY".into());
+        return Err("usage: static_smoke GUEST_DIRECTORY [SECONDS]".into());
     }
 
     let mut manifest: GuestManifest =
@@ -41,7 +51,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ios_hv_host: None,
     };
     let handle = relay_vm::start(&spec)?;
-    println!("Relay static guest ready: {}", handle.id);
+    println!("Relay static guest started: {}", handle.id);
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline
+        && relay_vm::status(&handle.id)? == relay_vm::RelayVmStatus::Running
+    {
+        thread::sleep(Duration::from_millis(25));
+    }
+    let status = relay_vm::status(&handle.id)?;
+    let console = relay_vm::console_log(&handle.id)?;
+    relay_vm::stop(&handle.id)?;
+    if !console.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&console));
+    }
+    if status == relay_vm::RelayVmStatus::Exited {
+        return Err("Relay static guest exited before smoke deadline".into());
+    }
+    println!("Relay static guest remained live for {seconds}s");
     Ok(())
 }
 
