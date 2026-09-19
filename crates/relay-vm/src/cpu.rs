@@ -775,11 +775,10 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
-        // LDR/STR unscaled, pre-indexed and post-indexed, 32/64-bit forms.
-        if insn & 0x3b20_0000 == 0x3800_0000 && matches!(insn >> 30, 2 | 3) && (insn >> 10) & 3 != 2
-        {
-            let is_64 = insn >> 30 == 3;
-            let load = insn & 0x0040_0000 != 0;
+        // Integer LDR/STR unscaled, pre-indexed and post-indexed forms.
+        if insn & 0x3b20_0000 == 0x3800_0000 && (insn >> 10) & 3 != 2 {
+            let bytes = 1u64 << (insn >> 30);
+            let operation = (insn >> 22) & 3;
             let mode = (insn >> 10) & 3;
             let offset = sign_extend(((insn >> 12) & 0x1ff) as u64, 9);
             let rn = (insn >> 5) & 31;
@@ -790,19 +789,42 @@ impl StaticCpu {
                 base.wrapping_add(offset as u64)
             };
             let rt = insn & 31;
-            if load {
-                self.set(
-                    rt,
-                    if is_64 {
-                        self.read64(address)?
-                    } else {
-                        self.read32(address)? as u64
-                    },
-                );
-            } else if is_64 {
-                self.write64(address, self.x(rt))?;
-            } else {
-                self.write32(address, self.x(rt) as u32)?;
+            match operation {
+                0 => match bytes {
+                    1 => self.write8(address, self.x(rt) as u8)?,
+                    2 => self.write16(address, self.x(rt) as u16)?,
+                    4 => self.write32(address, self.x(rt) as u32)?,
+                    8 => self.write64(address, self.x(rt))?,
+                    _ => unreachable!(),
+                },
+                1 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as u64,
+                        2 => self.read16(address)? as u64,
+                        4 => self.read32(address)? as u64,
+                        8 => self.read64(address)?,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                2 if bytes < 8 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as i8 as i64 as u64,
+                        2 => self.read16(address)? as i16 as i64 as u64,
+                        4 => self.read32(address)? as i32 as i64 as u64,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                3 if bytes <= 2 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as i8 as i32 as u32 as u64,
+                        2 => self.read16(address)? as i16 as i32 as u32 as u64,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                _ => return self.unsupported(pc, insn),
             }
             if mode != 0 {
                 self.set_x_or_sp(rn, base.wrapping_add(offset as u64));
@@ -1003,6 +1025,18 @@ mod tests {
         let mut cpu = StaticCpu::new(memory, 0).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.x(0), 0xa5);
+    }
+
+    #[test]
+    fn post_indexed_byte_load_updates_pointer() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x3840_1406u32.to_le_bytes()).unwrap(); // LDRB W6,[X0],#1
+        memory.write(0x100, &[0xa5]).unwrap();
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(0, 0x100);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(6), 0xa5);
+        assert_eq!(cpu.x(0), 0x101);
     }
 
     #[test]
