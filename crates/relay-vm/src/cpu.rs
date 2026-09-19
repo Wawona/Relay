@@ -120,6 +120,23 @@ impl StaticCpu {
         }
         self.memory.write(physical, &value.to_le_bytes())
     }
+    fn read8(&self, address: u64) -> Result<u8, RelayError> {
+        let mut bytes = [0; 1];
+        self.memory.read(self.physical(address)?, &mut bytes)?;
+        Ok(bytes[0])
+    }
+    fn write8(&mut self, address: u64, value: u8) -> Result<(), RelayError> {
+        self.memory.write(self.physical(address)?, &[value])
+    }
+    fn read16(&self, address: u64) -> Result<u16, RelayError> {
+        let mut bytes = [0; 2];
+        self.memory.read(self.physical(address)?, &mut bytes)?;
+        Ok(u16::from_le_bytes(bytes))
+    }
+    fn write16(&mut self, address: u64, value: u16) -> Result<(), RelayError> {
+        self.memory
+            .write(self.physical(address)?, &value.to_le_bytes())
+    }
     fn read64(&self, address: u64) -> Result<u64, RelayError> {
         let mut bytes = [0; 8];
         self.memory.read(self.physical(address)?, &mut bytes)?;
@@ -525,27 +542,51 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
-        // LDR/STR unsigned immediate, 32- and 64-bit forms.
-        let class = insn & 0xffc0_0000;
-        if matches!(class, 0xf900_0000 | 0xf940_0000 | 0xb900_0000 | 0xb940_0000) {
-            let is_64 = class & 0x4000_0000 != 0;
-            let load = class & 0x0040_0000 != 0;
-            let offset = ((insn >> 10) & 0xfff) as u64 * if is_64 { 8 } else { 4 };
+        // Integer LDR/STR unsigned immediate, including byte/halfword and
+        // sign-extending loads used after Linux establishes its early stack.
+        if insn & 0x3b00_0000 == 0x3900_0000 {
+            let size_shift = insn >> 30;
+            let bytes = 1u64 << size_shift;
+            let operation = (insn >> 22) & 3;
+            let offset = ((insn >> 10) & 0xfff) as u64 * bytes;
             let address = self.x_or_sp((insn >> 5) & 31).wrapping_add(offset);
             let rt = insn & 31;
-            if load {
-                self.set(
-                    rt,
-                    if is_64 {
-                        self.read64(address)?
-                    } else {
-                        self.read32(address)? as u64
-                    },
-                );
-            } else if is_64 {
-                self.write64(address, self.x(rt))?;
-            } else {
-                self.write32(address, self.x(rt) as u32)?;
+            match operation {
+                0 => match bytes {
+                    1 => self.write8(address, self.x(rt) as u8)?,
+                    2 => self.write16(address, self.x(rt) as u16)?,
+                    4 => self.write32(address, self.x(rt) as u32)?,
+                    8 => self.write64(address, self.x(rt))?,
+                    _ => unreachable!(),
+                },
+                1 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as u64,
+                        2 => self.read16(address)? as u64,
+                        4 => self.read32(address)? as u64,
+                        8 => self.read64(address)?,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                2 if bytes < 8 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as i8 as i64 as u64,
+                        2 => self.read16(address)? as i16 as i64 as u64,
+                        4 => self.read32(address)? as i32 as i64 as u64,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                3 if bytes <= 2 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as i8 as i32 as u32 as u64,
+                        2 => self.read16(address)? as i16 as i32 as u32 as u64,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                _ => return self.unsupported(pc, insn),
             }
             self.pc = next;
             return Ok(());
@@ -746,6 +787,16 @@ mod tests {
         cpu.pc = 8;
         cpu.step().unwrap();
         assert_eq!(cpu.bus.console(), b"R");
+    }
+
+    #[test]
+    fn loads_bytes_with_unsigned_offsets() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x3973_0000u32.to_le_bytes()).unwrap(); // LDRB W0,[X0,#3264]
+        memory.write(3264, &[0xa5]).unwrap();
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(0), 0xa5);
     }
 
     #[test]
