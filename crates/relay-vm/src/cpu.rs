@@ -210,6 +210,12 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // Exception return through the EL1 state Linux prepared. Interrupt
+        // masks/mode remain guest state; instruction flow resumes at ELR_EL1.
+        if insn == 0xd69f_03e0 {
+            self.pc = self.sysregs.elr_el1;
+            return Ok(());
+        }
         // B.cond: the early boot path chiefly needs EQ/NE, but model all
         // integer condition encodings so compare loops remain deterministic.
         if insn & 0xff00_0010 == 0x5400_0000 {
@@ -931,6 +937,22 @@ mod tests {
         let mut cpu = StaticCpu::new(memory, 0).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.x(0), 24_000_000);
+    }
+
+    #[test]
+    fn linux_el1_exception_return_uses_programmed_link() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xd518_4000u32.to_le_bytes()).unwrap(); // MSR SPSR_EL1,X0
+        memory.write(4, &0xd518_403eu32.to_le_bytes()).unwrap(); // MSR ELR_EL1,X30
+        memory.write(8, &0xd69f_03e0u32.to_le_bytes()).unwrap(); // ERET
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(0, 0x3c5);
+        cpu.set_x(30, 0x100);
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.sysregs.spsr_el1, 0x3c5);
+        assert_eq!(cpu.pc, 0x100);
     }
 
     #[test]
