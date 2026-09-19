@@ -63,6 +63,30 @@ impl StaticCpu {
             self.x[register as usize] = value;
         }
     }
+    fn condition_holds(&self, condition: u32) -> bool {
+        let n = self.nzcv & 8 != 0;
+        let z = self.nzcv & 4 != 0;
+        let c = self.nzcv & 2 != 0;
+        let v = self.nzcv & 1 != 0;
+        match condition {
+            0 => z,
+            1 => !z,
+            2 => c,
+            3 => !c,
+            4 => n,
+            5 => !n,
+            6 => v,
+            7 => !v,
+            8 => c && !z,
+            9 => !c || z,
+            10 => n == v,
+            11 => n != v,
+            12 => !z && n == v,
+            13 => z || n != v,
+            14 => true,
+            _ => false,
+        }
+    }
     fn word(&self) -> Result<u32, RelayError> {
         let mut bytes = [0; 4];
         self.memory.read(self.physical(self.pc)?, &mut bytes)?;
@@ -159,28 +183,7 @@ impl StaticCpu {
         // integer condition encodings so compare loops remain deterministic.
         if insn & 0xff00_0010 == 0x5400_0000 {
             let imm = sign_extend(((insn >> 5) & 0x7ffff) as u64, 19) << 2;
-            let n = self.nzcv & 8 != 0;
-            let z = self.nzcv & 4 != 0;
-            let c = self.nzcv & 2 != 0;
-            let v = self.nzcv & 1 != 0;
-            let take = match insn & 15 {
-                0 => z,
-                1 => !z,
-                2 => c,
-                3 => !c,
-                4 => n,
-                5 => !n,
-                6 => v,
-                7 => !v,
-                8 => c && !z,
-                9 => !c || z,
-                10 => n == v,
-                11 => n != v,
-                12 => !z && n == v,
-                13 => z || n != v,
-                14 => true,
-                _ => false,
-            };
+            let take = self.condition_holds(insn & 15);
             self.pc = if take {
                 pc.wrapping_add(imm as u64)
             } else {
@@ -222,6 +225,27 @@ impl StaticCpu {
                 imm
             };
             self.set(insn & 31, base.wrapping_add(displacement as u64));
+            self.pc = next;
+            return Ok(());
+        }
+        // CSEL/CSINC/CSINV/CSNEG. Linux uses CSEL immediately after testing
+        // the entry SCTLR state to retain or clear its boot-mode register.
+        if insn & 0x1fe0_0000 == 0x1a80_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let mask = if is_64 { u64::MAX } else { u32::MAX as u64 };
+            let value = if self.condition_holds((insn >> 12) & 15) {
+                self.x((insn >> 5) & 31)
+            } else {
+                let alternate = self.x((insn >> 16) & 31);
+                match ((insn >> 30) & 1, (insn >> 10) & 1) {
+                    (0, 0) => alternate,
+                    (0, 1) => alternate.wrapping_add(1),
+                    (1, 0) => !alternate,
+                    (1, 1) => alternate.wrapping_neg(),
+                    _ => unreachable!(),
+                }
+            };
+            self.set(insn & 31, value & mask);
             self.pc = next;
             return Ok(());
         }
@@ -597,14 +621,19 @@ mod tests {
     fn tst_logical_immediate_sets_linux_boot_condition_flags() {
         let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
         memory.write(0, &0xf27e_027fu32.to_le_bytes()).unwrap(); // TST X19,#4
+        memory.write(4, &0x9a93_03f3u32.to_le_bytes()).unwrap(); // CSEL X19,XZR,X19,EQ
         let mut cpu = StaticCpu::new(memory, 0).unwrap();
         cpu.set_x(19, 4);
         cpu.step().unwrap();
         assert_eq!(cpu.nzcv & 4, 0);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(19), 4);
         cpu.pc = 0;
         cpu.set_x(19, 0);
         cpu.step().unwrap();
         assert_eq!(cpu.nzcv & 4, 4);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(19), 0);
     }
 
     #[test]
