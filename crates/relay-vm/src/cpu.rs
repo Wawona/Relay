@@ -96,12 +96,12 @@ impl StaticCpu {
         if self.sysregs.sctlr_el1 & 1 == 0 {
             Ok(address)
         } else {
-            crate::mmu::walk_stage1(
-                &self.memory,
-                address,
-                self.sysregs.ttbr0_el1,
-                self.memory.page_size(),
-            )
+            let table = if address >> 63 != 0 {
+                self.sysregs.ttbr1_el1
+            } else {
+                self.sysregs.ttbr0_el1
+            };
+            crate::mmu::walk_stage1(&self.memory, address, table, self.memory.page_size())
         }
     }
     fn read32(&self, address: u64) -> Result<u32, RelayError> {
@@ -713,6 +713,11 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // Relay performs page-table walks directly and has no cached TLB.
+        if insn == 0xd508_871f {
+            self.pc = next;
+            return Ok(());
+        }
         self.unsupported(pc, insn)
     }
     fn unsupported<T>(&self, pc: u64, word: u32) -> Result<T, RelayError> {
@@ -904,6 +909,7 @@ mod tests {
             (4, 0xd508_7620_u32),  // DC IVAC,X0
             (8, 0x8b02_0000_u32),  // ADD X0,X0,X2
             (12, 0xeb01_001f_u32), // CMP X0,X1
+            (16, 0xd508_871f_u32), // TLBI VMALLE1
         ] {
             memory.write(offset, &instruction.to_le_bytes()).unwrap();
         }
@@ -917,6 +923,8 @@ mod tests {
         assert_eq!(cpu.x(0), 0x1040);
         cpu.step().unwrap();
         assert_eq!(cpu.nzcv & 4, 4);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc, 20);
     }
 
     #[test]

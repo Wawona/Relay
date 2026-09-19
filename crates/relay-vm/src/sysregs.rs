@@ -2,7 +2,9 @@
 use relay_core::RelayError;
 
 pub(crate) const SCTLR_EL1: u16 = 0xc080;
+pub(crate) const CPACR_EL1: u16 = 0xc082;
 pub(crate) const TTBR0_EL1: u16 = 0xc100;
+pub(crate) const TTBR1_EL1: u16 = 0xc101;
 pub(crate) const TCR_EL1: u16 = 0xc102;
 pub(crate) const MAIR_EL1: u16 = 0xc510;
 pub(crate) const VBAR_EL1: u16 = 0xc600;
@@ -10,6 +12,8 @@ pub(crate) const CNTFRQ_EL0: u16 = 0xdf00;
 pub(crate) const CNTPCT_EL0: u16 = 0xdf01;
 pub(crate) const MIDR_EL1: u16 = 0xc000;
 pub(crate) const ID_AA64PFR0_EL1: u16 = 0xc020;
+pub(crate) const ID_AA64DFR0_EL1: u16 = 0xc028;
+pub(crate) const MDSCR_EL1: u16 = 0x8012;
 pub(crate) const CURRENT_EL: u16 = 0xc212;
 pub(crate) const SPSR_EL1: u16 = 0xc200;
 pub(crate) const ELR_EL1: u16 = 0xc201;
@@ -20,12 +24,15 @@ pub(crate) const DCZID_EL0: u16 = 0xd807;
 #[derive(Debug, Clone)]
 pub(crate) struct SysRegs {
     pub sctlr_el1: u64,
+    pub cpacr_el1: u64,
     pub ttbr0_el1: u64,
+    pub ttbr1_el1: u64,
     pub tcr_el1: u64,
     pub mair_el1: u64,
     pub vbar_el1: u64,
     pub spsr_el1: u64,
     pub elr_el1: u64,
+    pub mdscr_el1: u64,
     spsel: u64,
     counter: u64,
     counter_frequency: u64,
@@ -37,12 +44,15 @@ impl SysRegs {
         }
         Ok(Self {
             sctlr_el1: 0,
+            cpacr_el1: 0,
             ttbr0_el1: 0,
+            ttbr1_el1: 0,
             tcr_el1: 0,
             mair_el1: 0,
             vbar_el1: 0,
             spsr_el1: 0,
             elr_el1: 0,
+            mdscr_el1: 0,
             spsel: 1,
             counter: 0,
             counter_frequency,
@@ -54,7 +64,9 @@ impl SysRegs {
     pub(crate) fn read(&self, reg: u16) -> Result<u64, RelayError> {
         match reg {
             SCTLR_EL1 => Ok(self.sctlr_el1),
+            CPACR_EL1 => Ok(self.cpacr_el1),
             TTBR0_EL1 => Ok(self.ttbr0_el1),
+            TTBR1_EL1 => Ok(self.ttbr1_el1),
             TCR_EL1 => Ok(self.tcr_el1),
             MAIR_EL1 => Ok(self.mair_el1),
             VBAR_EL1 => Ok(self.vbar_el1),
@@ -62,6 +74,8 @@ impl SysRegs {
             CNTPCT_EL0 => Ok(self.counter),
             MIDR_EL1 => Ok(0x410f_d0c0),
             ID_AA64PFR0_EL1 => Ok(0x11),
+            ID_AA64DFR0_EL1 => Ok(0),
+            MDSCR_EL1 => Ok(self.mdscr_el1),
             CURRENT_EL => Ok(1 << 2),
             SPSR_EL1 => Ok(self.spsr_el1),
             ELR_EL1 => Ok(self.elr_el1),
@@ -79,20 +93,23 @@ impl SysRegs {
     pub(crate) fn write(&mut self, reg: u16, value: u64) -> Result<(), RelayError> {
         match reg {
             SCTLR_EL1 => self.sctlr_el1 = value,
+            CPACR_EL1 => self.cpacr_el1 = value,
             TTBR0_EL1 => self.ttbr0_el1 = value,
+            TTBR1_EL1 => self.ttbr1_el1 = value,
             TCR_EL1 => self.tcr_el1 = value,
             MAIR_EL1 => self.mair_el1 = value,
             VBAR_EL1 => self.vbar_el1 = value,
             SPSR_EL1 => self.spsr_el1 = value,
             ELR_EL1 => self.elr_el1 = value,
+            MDSCR_EL1 => self.mdscr_el1 = value,
             SPSEL if value <= 1 => self.spsel = value,
             SPSEL => {
                 return Err(RelayError::Failed(
                     "StaticCpu SPSel value is invalid".into(),
                 ))
             }
-            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 | CURRENT_EL | CTR_EL0
-            | DCZID_EL0 => {
+            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 | ID_AA64DFR0_EL1 | CURRENT_EL
+            | CTR_EL0 | DCZID_EL0 => {
                 return Err(RelayError::Failed(
                     "StaticCpu attempted write to read-only system register".into(),
                 ))
@@ -113,9 +130,11 @@ mod tests {
     fn el1_registers_preserve_mmu_state_and_counter_is_monotonic() {
         let mut regs = SysRegs::new(24_000_000).unwrap();
         regs.write(TTBR0_EL1, 0x4000).unwrap();
+        regs.write(TTBR1_EL1, 0x8000).unwrap();
         regs.write(SCTLR_EL1, 1).unwrap();
         regs.tick(12);
         assert_eq!(regs.read(TTBR0_EL1).unwrap(), 0x4000);
+        assert_eq!(regs.read(TTBR1_EL1).unwrap(), 0x8000);
         assert_eq!(regs.read(SCTLR_EL1).unwrap() & 1, 1);
         assert_eq!(regs.read(CNTFRQ_EL0).unwrap(), 24_000_000);
         assert_eq!(regs.read(CNTPCT_EL0).unwrap(), 12);
