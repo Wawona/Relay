@@ -10,6 +10,7 @@ pub(crate) const CNTFRQ_EL0: u16 = 0xdf00;
 pub(crate) const CNTPCT_EL0: u16 = 0xdf01;
 pub(crate) const MIDR_EL1: u16 = 0xc000;
 pub(crate) const ID_AA64PFR0_EL1: u16 = 0xc020;
+pub(crate) const CURRENT_EL: u16 = 0xc212;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SysRegs {
@@ -50,6 +51,7 @@ impl SysRegs {
             CNTPCT_EL0 => Ok(self.counter),
             MIDR_EL1 => Ok(0x410f_d0c0),
             ID_AA64PFR0_EL1 => Ok(0x11),
+            CURRENT_EL => Ok(1 << 2),
             _ => Err(RelayError::Failed(format!(
                 "StaticCpu unimplemented system register {reg:#06x}"
             ))),
@@ -62,7 +64,7 @@ impl SysRegs {
             TCR_EL1 => self.tcr_el1 = value,
             MAIR_EL1 => self.mair_el1 = value,
             VBAR_EL1 => self.vbar_el1 = value,
-            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 => {
+            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 | CURRENT_EL => {
                 return Err(RelayError::Failed(
                     "StaticCpu attempted write to read-only system register".into(),
                 ))
@@ -89,6 +91,7 @@ mod tests {
         assert_eq!(regs.read(SCTLR_EL1).unwrap() & 1, 1);
         assert_eq!(regs.read(CNTFRQ_EL0).unwrap(), 24_000_000);
         assert_eq!(regs.read(CNTPCT_EL0).unwrap(), 12);
+        assert_eq!(regs.read(CURRENT_EL).unwrap(), 4);
         assert!(regs.write(CNTFRQ_EL0, 1).is_err());
     }
 }
