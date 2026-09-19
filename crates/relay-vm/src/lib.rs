@@ -112,7 +112,6 @@ fn start_ios(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
         &resources.trusted_guest_keys,
         resources.allow_unsigned_guest,
     )?;
-    guest::validate_artifacts(manifest)?;
     linux_boot::prepare(manifest)?;
     unreachable!("linux_boot::prepare reports execution state or an error")
 }

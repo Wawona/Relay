@@ -33,6 +33,15 @@ pub fn read_image_header(kernel: &GuestArtifact) -> Result<ImageHeader, RelayErr
             "guest kernel is smaller than ARM64 Image header: {error}"
         ))
     })?;
+    parse_image_header(&bytes)
+}
+
+fn parse_image_header(bytes: &[u8]) -> Result<ImageHeader, RelayError> {
+    if bytes.len() < HEADER_BYTES {
+        return Err(RelayError::Failed(
+            "guest kernel is smaller than ARM64 Image header".into(),
+        ));
+    }
     let magic = u32::from_le_bytes(bytes[0x38..0x3c].try_into().unwrap());
     if magic != ARM64_IMAGE_MAGIC {
         return Err(RelayError::Failed(format!(
@@ -50,13 +59,13 @@ pub fn read_image_header(kernel: &GuestArtifact) -> Result<ImageHeader, RelayErr
 /// Verify, stage the Image/DTB/initrd into the one guest RAM arena, and report
 /// a fail-closed instruction boundary until the real EL1 runner accepts it.
 pub fn prepare(manifest: &GuestManifest) -> Result<LinuxBootState, RelayError> {
-    let header = read_image_header(&manifest.kernel)?;
+    let (guest, boot) = guest::prepare_linux_boot(manifest)?;
+    let header = parse_image_header(&guest.kernel)?;
     if header.first_instruction == 0 {
         return Err(RelayError::Failed(
             "ARM64 Image has an empty entry instruction".into(),
         ));
     }
-    let (guest, boot) = guest::prepare_linux_boot(manifest)?;
     let mut cpu = StaticCpu::new(guest.memory, boot.entry_pc)?;
     // ARM64 Linux boot protocol: x0 is the physical DTB address, the other
     // argument registers are zero on entry.  Follow real Image control flow

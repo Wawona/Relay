@@ -44,16 +44,19 @@ pub fn prepare_linux_boot(
     // The immutable rootfs is a virtio-block backing store, never a second
     // in-RAM copy.  Verify it before allocating RAM, then stage only the
     // executable boot artifacts into the single GuestMemory arena.
-    let page_size = validate_artifacts(manifest)?;
+    let page_size = manifest.validate()?;
+    let kernel = read_artifact("kernel", &manifest.kernel)?;
+    let initrd = manifest
+        .initrd
+        .as_ref()
+        .map(|artifact| read_artifact("initrd", artifact))
+        .transpose()?;
+    verify_artifact("rootfs", &manifest.rootfs)?;
     let mut guest = LoadedGuest {
         page_size,
         memory: GuestMemory::allocate(page_size, manifest.memory_bytes)?,
-        kernel: read_artifact("kernel", &manifest.kernel)?,
-        initrd: manifest
-            .initrd
-            .as_ref()
-            .map(|artifact| read_artifact("initrd", artifact))
-            .transpose()?,
+        kernel,
+        initrd,
         // `start_ios` attaches this verified artifact through virtio-block.
         // Keeping it empty here prevents a rootfs-sized duplicate allocation.
         rootfs: Vec::new(),
