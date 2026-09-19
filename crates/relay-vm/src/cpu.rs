@@ -799,6 +799,10 @@ impl StaticCpu {
                     };
                     self.set(rt, value);
                 }
+                2 if bytes == 8 => {
+                    // PRFM is a non-faulting performance hint. StaticCpu has
+                    // no host cache predictor, so preserving flow is enough.
+                }
                 2 if bytes < 8 => {
                     let value = match bytes {
                         1 => self.read8(address)? as i8 as i64 as u64,
@@ -852,6 +856,9 @@ impl StaticCpu {
                         _ => unreachable!(),
                     };
                     self.set(rt, value);
+                }
+                2 if bytes == 8 && mode == 0 => {
+                    // PRFUM is a non-faulting cache hint.
                 }
                 2 if bytes < 8 => {
                     let value = match bytes {
@@ -914,6 +921,9 @@ impl StaticCpu {
                         _ => unreachable!(),
                     };
                     self.set(rt, value);
+                }
+                2 if bytes == 8 => {
+                    // Register-offset PRFM is a non-faulting cache hint.
                 }
                 2 if bytes < 8 => {
                     let value = match bytes {
@@ -1140,10 +1150,13 @@ mod tests {
     fn loads_bytes_with_unsigned_offsets() {
         let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
         memory.write(0, &0x3973_0000u32.to_le_bytes()).unwrap(); // LDRB W0,[X0,#3264]
+        memory.write(4, &0xf980_00d1u32.to_le_bytes()).unwrap(); // PRFM PSTL1STRM,[X6]
         memory.write(3264, &[0xa5]).unwrap();
         let mut cpu = StaticCpu::new(memory, 0).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.x(0), 0xa5);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc, 8);
     }
 
     #[test]
