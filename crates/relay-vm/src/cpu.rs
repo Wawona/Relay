@@ -832,6 +832,65 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // Integer LDR/STR register offset with UXTW/LSL/SXTW/SXTX indexing.
+        if insn & 0x3b20_0c00 == 0x3820_0800 {
+            let size_shift = insn >> 30;
+            let bytes = 1u64 << size_shift;
+            let operation = (insn >> 22) & 3;
+            let source = self.x((insn >> 16) & 31);
+            let option = (insn >> 13) & 7;
+            let mut offset = match option {
+                2 => source as u32 as u64,
+                3 => source,
+                6 => source as u32 as i32 as i64 as u64,
+                7 => source as i64 as u64,
+                _ => return self.unsupported(pc, insn),
+            };
+            if insn & (1 << 12) != 0 {
+                offset = offset.wrapping_shl(size_shift);
+            }
+            let address = self.x_or_sp((insn >> 5) & 31).wrapping_add(offset);
+            let rt = insn & 31;
+            match operation {
+                0 => match bytes {
+                    1 => self.write8(address, self.x(rt) as u8)?,
+                    2 => self.write16(address, self.x(rt) as u16)?,
+                    4 => self.write32(address, self.x(rt) as u32)?,
+                    8 => self.write64(address, self.x(rt))?,
+                    _ => unreachable!(),
+                },
+                1 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as u64,
+                        2 => self.read16(address)? as u64,
+                        4 => self.read32(address)? as u64,
+                        8 => self.read64(address)?,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                2 if bytes < 8 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as i8 as i64 as u64,
+                        2 => self.read16(address)? as i16 as i64 as u64,
+                        4 => self.read32(address)? as i32 as i64 as u64,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                3 if bytes <= 2 => {
+                    let value = match bytes {
+                        1 => self.read8(address)? as i8 as i32 as u32 as u64,
+                        2 => self.read16(address)? as i16 as i32 as u32 as u64,
+                        _ => unreachable!(),
+                    };
+                    self.set(rt, value);
+                }
+                _ => return self.unsupported(pc, insn),
+            }
+            self.pc = next;
+            return Ok(());
+        }
         // LDP/STP X registers in post-index, signed-offset and pre-index modes.
         if insn & 0x3e00_0000 == 0x2800_0000 && insn >> 30 == 2 && matches!((insn >> 23) & 3, 1..=3)
         {
@@ -1037,6 +1096,18 @@ mod tests {
         cpu.step().unwrap();
         assert_eq!(cpu.x(6), 0xa5);
         assert_eq!(cpu.x(0), 0x101);
+    }
+
+    #[test]
+    fn register_offset_byte_load_sign_extends_index() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x3878_caa0u32.to_le_bytes()).unwrap(); // LDRB W0,[X21,W24,SXTW]
+        memory.write(0xff, &[0x5a]).unwrap();
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(21, 0x100);
+        cpu.set_x(24, u32::MAX as u64);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(0), 0x5a);
     }
 
     #[test]
