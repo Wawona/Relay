@@ -528,6 +528,59 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // RBIT/REV*/CLZ/CLS unary data processing.
+        if insn & 0x7fff_c000 == 0x5ac0_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let source = self.x((insn >> 5) & 31) & low_mask(width);
+            let result = match (insn >> 10) & 15 {
+                0 => {
+                    if is_64 {
+                        source.reverse_bits()
+                    } else {
+                        (source as u32).reverse_bits() as u64
+                    }
+                }
+                1 => reverse_bytes_in_halfwords(source, width),
+                2 => {
+                    if is_64 {
+                        u64::from((source as u32).swap_bytes())
+                            | (u64::from(((source >> 32) as u32).swap_bytes()) << 32)
+                    } else {
+                        (source as u32).swap_bytes() as u64
+                    }
+                }
+                3 if is_64 => source.swap_bytes(),
+                4 => {
+                    if is_64 {
+                        u64::from(source.leading_zeros())
+                    } else {
+                        u64::from((source as u32).leading_zeros())
+                    }
+                }
+                5 => {
+                    let count = if is_64 {
+                        if source >> 63 == 0 {
+                            source.leading_zeros()
+                        } else {
+                            (!source).leading_zeros()
+                        }
+                    } else {
+                        let value = source as u32;
+                        if value >> 31 == 0 {
+                            value.leading_zeros()
+                        } else {
+                            (!value).leading_zeros()
+                        }
+                    };
+                    u64::from(count.saturating_sub(1))
+                }
+                _ => return self.unsupported(pc, insn),
+            };
+            self.set(insn & 31, result & low_mask(width));
+            self.pc = next;
+            return Ok(());
+        }
         // MADD/MSUB and MUL/MNEG aliases.
         if insn & 0x1fe0_0000 == 0x1b00_0000 {
             let is_64 = insn & 0x8000_0000 != 0;
@@ -793,6 +846,15 @@ fn sign_extend_width(value: u64, bits: u32, width: u32) -> u64 {
     }
 }
 
+fn reverse_bytes_in_halfwords(value: u64, width: u32) -> u64 {
+    let mut result = 0;
+    for shift in (0..width).step_by(16) {
+        result |= ((value >> shift) & 0xff) << (shift + 8);
+        result |= ((value >> (shift + 8)) & 0xff) << shift;
+    }
+    result
+}
+
 fn decode_logical_immediate(is_64: bool, n: u32, immr: u32, imms: u32) -> Option<u64> {
     if !is_64 && n != 0 {
         return None;
@@ -1011,6 +1073,16 @@ mod tests {
         cpu.set_x(5, 6);
         cpu.step().unwrap();
         assert_eq!(cpu.x(2), 42);
+    }
+
+    #[test]
+    fn reverse_bytes_executes_in_page_table_path() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xdac0_0c84u32.to_le_bytes()).unwrap(); // REV X4,X4
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(4, 0x0123_4567_89ab_cdef);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(4), 0xefcd_ab89_6745_2301);
     }
 
     #[test]
