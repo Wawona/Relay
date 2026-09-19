@@ -926,12 +926,15 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
-        // LDP/STP X registers in post-index, signed-offset and pre-index modes.
-        if insn & 0x3e00_0000 == 0x2800_0000 && insn >> 30 == 2 && matches!((insn >> 23) & 3, 1..=3)
+        // LDP/STP W/X registers in post-index, signed-offset and pre-index modes.
+        if insn & 0x3e00_0000 == 0x2800_0000
+            && matches!(insn >> 30, 0 | 2)
+            && matches!((insn >> 23) & 3, 1..=3)
         {
+            let bytes = if insn >> 30 == 2 { 8 } else { 4 };
             let load = insn & 0x0040_0000 != 0;
             let mode = (insn >> 23) & 3;
-            let offset = sign_extend(((insn >> 15) & 0x7f) as u64, 7) * 8;
+            let offset = sign_extend(((insn >> 15) & 0x7f) as u64, 7) * i64::from(bytes);
             let rn = (insn >> 5) & 31;
             let base = self.x_or_sp(rn);
             let address = if mode == 1 {
@@ -942,13 +945,24 @@ impl StaticCpu {
             let rt = insn & 31;
             let rt2 = (insn >> 10) & 31;
             if load {
-                let first = self.read64(address)?;
-                let second = self.read64(address + 8)?;
+                let first = if bytes == 8 {
+                    self.read64(address)?
+                } else {
+                    self.read32(address)? as u64
+                };
+                let second = if bytes == 8 {
+                    self.read64(address + 8)?
+                } else {
+                    self.read32(address + 4)? as u64
+                };
                 self.set(rt, first);
                 self.set(rt2, second);
-            } else {
+            } else if bytes == 8 {
                 self.write64(address, self.x(rt))?;
                 self.write64(address + 8, self.x(rt2))?;
+            } else {
+                self.write32(address, self.x(rt) as u32)?;
+                self.write32(address + 4, self.x(rt2) as u32)?;
             }
             if matches!(mode, 1 | 3) {
                 self.set_x_or_sp(rn, base.wrapping_add(offset as u64));
@@ -1349,6 +1363,20 @@ mod tests {
         assert_eq!(cpu.sp, 0x800);
         assert_eq!(cpu.x(1), 0x800);
         assert_eq!(cpu.x(21), 0xfeed_face_cafe_beef);
+    }
+
+    #[test]
+    fn word_pair_store_uses_four_byte_elements() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x2908_7fe1u32.to_le_bytes()).unwrap(); // STP W1,WZR,[SP,#64]
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.sp = 0x100;
+        cpu.set_x(1, 0xfeed_face);
+        cpu.step().unwrap();
+        let mut stored = [0xff; 8];
+        cpu.memory.read(0x140, &mut stored).unwrap();
+        assert_eq!(&stored[..4], &0xfeed_faceu32.to_le_bytes());
+        assert_eq!(&stored[4..], &[0; 4]);
     }
 
     #[test]
