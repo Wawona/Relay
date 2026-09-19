@@ -109,12 +109,13 @@ pub(crate) fn walk_stage1(
     ttbr0_el1: u64,
     page_size: GuestPageSize,
 ) -> Result<u64, RelayError> {
+    const PHYSICAL_ADDRESS_MASK: u64 = (1u64 << 48) - 1;
     let (shifts, entries) = match page_size.0 {
         4096 => ([39u32, 30, 21, 12], 512u64),
         16384 => ([47u32, 36, 25, 14], 2048u64),
         _ => return Err(RelayError::Failed("unsupported stage-1 granule".into())),
     };
-    let mut table = ttbr0_el1 & !(page_size.0 as u64 - 1);
+    let mut table = ttbr0_el1 & PHYSICAL_ADDRESS_MASK & !(page_size.0 as u64 - 1);
     for (level, shift) in shifts.into_iter().enumerate() {
         let index = (virtual_address >> shift) & (entries - 1);
         let address = table
@@ -129,11 +130,13 @@ pub(crate) fn walk_stage1(
             )));
         }
         if level < 3 && descriptor & 2 != 0 {
-            table = descriptor & !(page_size.0 as u64 - 1);
+            table = descriptor & PHYSICAL_ADDRESS_MASK & !(page_size.0 as u64 - 1);
             continue;
         }
         let base_mask = !((1u64 << shift) - 1);
-        return Ok((descriptor & base_mask) | (virtual_address & !base_mask));
+        return Ok(
+            (descriptor & PHYSICAL_ADDRESS_MASK & base_mask) | (virtual_address & !base_mask)
+        );
     }
     Err(RelayError::Failed(
         "stage-1 page-table walk did not terminate".into(),
@@ -167,11 +170,11 @@ mod tests {
             for (level, shift) in shifts.into_iter().enumerate() {
                 let table = level as u64 * page.0 as u64;
                 let index = (va >> shift) & (entries - 1);
-                let descriptor = if level == 3 {
+                let descriptor = (if level == 3 {
                     0x400000 | 3
                 } else {
                     (level as u64 + 1) * page.0 as u64 | 3
-                };
+                }) | (1u64 << 60);
                 memory
                     .write(table + index * 8, &descriptor.to_le_bytes())
                     .unwrap();
