@@ -653,6 +653,25 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // SMADDL/SMSUBL/UMADDL/UMSUBL and SMULL/UMULL aliases.
+        if insn & 0x7f20_0000 == 0x1b20_0000 {
+            let left = self.x((insn >> 5) & 31) as u32;
+            let right = self.x((insn >> 16) & 31) as u32;
+            let product = if insn & (1 << 23) != 0 {
+                u64::from(left).wrapping_mul(u64::from(right))
+            } else {
+                (left as i32 as i64).wrapping_mul(right as i32 as i64) as u64
+            };
+            let addend = self.x((insn >> 10) & 31);
+            let result = if insn & (1 << 15) == 0 {
+                product.wrapping_add(addend)
+            } else {
+                addend.wrapping_sub(product)
+            };
+            self.set(insn & 31, result);
+            self.pc = next;
+            return Ok(());
+        }
         // MOVN/MOVZ/MOVK, 32- and 64-bit forms.
         if insn & 0x1f80_0000 == 0x1280_0000 {
             let is_64 = insn & 0x8000_0000 != 0;
@@ -1232,6 +1251,17 @@ mod tests {
         cpu.set_x(5, 6);
         cpu.step().unwrap();
         assert_eq!(cpu.x(2), 42);
+    }
+
+    #[test]
+    fn signed_long_multiply_extends_32_bit_operands() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x9b26_7f46u32.to_le_bytes()).unwrap(); // SMULL X6,W26,W6
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(26, u32::MAX as u64);
+        cpu.set_x(6, 7);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(6), (-7_i64) as u64);
     }
 
     #[test]
