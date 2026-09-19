@@ -24,6 +24,7 @@ pub(crate) const MDSCR_EL1: u16 = 0x8012;
 pub(crate) const CURRENT_EL: u16 = 0xc212;
 pub(crate) const SPSR_EL1: u16 = 0xc200;
 pub(crate) const ELR_EL1: u16 = 0xc201;
+pub(crate) const SP_EL0: u16 = 0xc208;
 pub(crate) const SPSEL: u16 = 0xc210;
 pub(crate) const CTR_EL0: u16 = 0xd801;
 pub(crate) const DCZID_EL0: u16 = 0xd807;
@@ -39,6 +40,7 @@ pub(crate) struct SysRegs {
     pub vbar_el1: u64,
     pub spsr_el1: u64,
     pub elr_el1: u64,
+    pub sp_el0: u64,
     pub mdscr_el1: u64,
     spsel: u64,
     counter: u64,
@@ -59,6 +61,7 @@ impl SysRegs {
             vbar_el1: 0,
             spsr_el1: 0,
             elr_el1: 0,
+            sp_el0: 0,
             mdscr_el1: 0,
             spsel: 1,
             counter: 0,
@@ -90,6 +93,7 @@ impl SysRegs {
             CURRENT_EL => Ok(1 << 2),
             SPSR_EL1 => Ok(self.spsr_el1),
             ELR_EL1 => Ok(self.elr_el1),
+            SP_EL0 => Ok(self.sp_el0),
             SPSEL => Ok(self.spsel),
             // Cortex-A57-compatible 64-byte I/D cache lines. Relay executes
             // cache maintenance synchronously but Linux still requires
@@ -112,6 +116,7 @@ impl SysRegs {
             VBAR_EL1 => self.vbar_el1 = value,
             SPSR_EL1 => self.spsr_el1 = value,
             ELR_EL1 => self.elr_el1 = value,
+            SP_EL0 => self.sp_el0 = value,
             MDSCR_EL1 => self.mdscr_el1 = value,
             SPSEL if value <= 1 => self.spsel = value,
             SPSEL => {
@@ -155,8 +160,10 @@ mod tests {
         assert_eq!(regs.read(SPSEL).unwrap(), 1);
         regs.write(SPSR_EL1, 0x3c5).unwrap();
         regs.write(ELR_EL1, 0x80000).unwrap();
+        regs.write(SP_EL0, 0x90000).unwrap();
         assert_eq!(regs.read(SPSR_EL1).unwrap(), 0x3c5);
         assert_eq!(regs.read(ELR_EL1).unwrap(), 0x80000);
+        assert_eq!(regs.read(SP_EL0).unwrap(), 0x90000);
         regs.write(SPSEL, 0).unwrap();
         assert_eq!(regs.read(SPSEL).unwrap(), 0);
         assert_eq!(regs.read(CTR_EL0).unwrap(), 0x8444_c004);
