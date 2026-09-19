@@ -201,7 +201,7 @@ impl StaticCpu {
         // ADR/ADRP.
         if insn & 0x9f00_0000 == 0x1000_0000 {
             let imm = sign_extend(
-                (((insn >> 5) & 0x7ffff) | ((insn >> 29 & 3) << 19)) as u64,
+                ((((insn >> 5) & 0x7ffff) << 2) | ((insn >> 29) & 3)) as u64,
                 21,
             );
             let base = if insn & 0x8000_0000 != 0 {
@@ -264,7 +264,7 @@ impl StaticCpu {
                 let c = if subtract {
                     left >= immediate
                 } else {
-                    left.checked_add(immediate).is_some_and(|sum| sum <= mask)
+                    u128::from(left) + u128::from(immediate) > u128::from(mask)
                 };
                 let v = if subtract {
                     (((left ^ immediate) & (left ^ value)) >> sign) != 0
@@ -562,6 +562,18 @@ mod tests {
         assert_eq!(cpu.pc, 20);
         cpu.step().unwrap();
         assert_eq!(cpu.x(2), 0x0123_4567_89ab_cdef);
+    }
+
+    #[test]
+    fn pc_relative_addresses_keep_immlo_as_low_bits() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x1000_0803_u32.to_le_bytes()).unwrap(); // ADR X3,+0x100
+        memory.write(4, &0xf000_0004_u32.to_le_bytes()).unwrap(); // ADRP X4,+3 pages
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(3), 0x100);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(4), 0x3000);
     }
 
     #[test]
