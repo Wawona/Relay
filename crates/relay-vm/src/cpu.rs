@@ -340,7 +340,7 @@ impl StaticCpu {
             return Ok(());
         }
         // AND/ORR/EOR shifted register. MOV aliases are ORR with XZR.
-        if insn & 0x1f20_0000 == 0x0a00_0000 {
+        if insn & 0x1f00_0000 == 0x0a00_0000 {
             let is_64 = insn & 0x8000_0000 != 0;
             let width = if is_64 { 64 } else { 32 };
             let amount = (insn >> 10) & 63;
@@ -349,12 +349,15 @@ impl StaticCpu {
             }
             let left = self.x((insn >> 5) & 31);
             let source = self.x((insn >> 16) & 31);
-            let right = match (insn >> 22) & 3 {
+            let mut right = match (insn >> 22) & 3 {
                 0 => source << amount,
                 1 => source >> amount,
                 2 => ((source as i64) >> amount) as u64,
                 _ => return self.unsupported(pc, insn),
             };
+            if insn & (1 << 21) != 0 {
+                right = !right;
+            }
             let mask = if is_64 { u64::MAX } else { u32::MAX as u64 };
             let result = match (insn >> 29) & 3 {
                 0 | 3 => left & right,
@@ -733,6 +736,17 @@ mod tests {
         cpu.set_x(3, 6);
         cpu.step().unwrap();
         assert_eq!(cpu.x(2), 64);
+    }
+
+    #[test]
+    fn bic_clears_linux_cache_alignment_mask() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x8a23_0021u32.to_le_bytes()).unwrap(); // BIC X1,X1,X3
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(1, 0x123f);
+        cpu.set_x(3, 0x3f);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(1), 0x1200);
     }
 
     #[test]
