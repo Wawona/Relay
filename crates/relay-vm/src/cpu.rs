@@ -469,6 +469,24 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // MADD/MSUB and MUL/MNEG aliases.
+        if insn & 0x1fe0_0000 == 0x1b00_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let mask = low_mask(width);
+            let left = self.x((insn >> 5) & 31) & mask;
+            let right = self.x((insn >> 16) & 31) & mask;
+            let addend = self.x((insn >> 10) & 31) & mask;
+            let product = left.wrapping_mul(right) & mask;
+            let result = if insn & (1 << 15) == 0 {
+                product.wrapping_add(addend)
+            } else {
+                addend.wrapping_sub(product)
+            } & mask;
+            self.set(insn & 31, result);
+            self.pc = next;
+            return Ok(());
+        }
         // MOVN/MOVZ/MOVK, 32- and 64-bit forms.
         if insn & 0x1f80_0000 == 0x1280_0000 {
             let is_64 = insn & 0x8000_0000 != 0;
@@ -879,6 +897,17 @@ mod tests {
         assert_eq!(cpu.x(0), 0x1040);
         cpu.step().unwrap();
         assert_eq!(cpu.nzcv & 4, 4);
+    }
+
+    #[test]
+    fn multiply_alias_executes_in_32_bit_linux_path() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x1b02_7ca2u32.to_le_bytes()).unwrap(); // MUL W2,W5,W2
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(2, 7);
+        cpu.set_x(5, 6);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(2), 42);
     }
 
     #[test]
