@@ -8,6 +8,7 @@ pub(crate) const TTBR1_EL1: u16 = 0xc101;
 pub(crate) const TCR_EL1: u16 = 0xc102;
 pub(crate) const MAIR_EL1: u16 = 0xc510;
 pub(crate) const VBAR_EL1: u16 = 0xc600;
+pub(crate) const TPIDR_EL1: u16 = 0xc684;
 pub(crate) const CNTFRQ_EL0: u16 = 0xdf00;
 pub(crate) const CNTPCT_EL0: u16 = 0xdf01;
 pub(crate) const MIDR_EL1: u16 = 0xc000;
@@ -38,6 +39,7 @@ pub(crate) struct SysRegs {
     pub tcr_el1: u64,
     pub mair_el1: u64,
     pub vbar_el1: u64,
+    pub tpidr_el1: u64,
     pub spsr_el1: u64,
     pub elr_el1: u64,
     pub sp_el0: u64,
@@ -59,6 +61,7 @@ impl SysRegs {
             tcr_el1: 0,
             mair_el1: 0,
             vbar_el1: 0,
+            tpidr_el1: 0,
             spsr_el1: 0,
             elr_el1: 0,
             sp_el0: 0,
@@ -80,6 +83,7 @@ impl SysRegs {
             TCR_EL1 => Ok(self.tcr_el1),
             MAIR_EL1 => Ok(self.mair_el1),
             VBAR_EL1 => Ok(self.vbar_el1),
+            TPIDR_EL1 => Ok(self.tpidr_el1),
             CNTFRQ_EL0 => Ok(self.counter_frequency),
             CNTPCT_EL0 => Ok(self.counter),
             MIDR_EL1 => Ok(0x410f_d0c0),
@@ -114,6 +118,7 @@ impl SysRegs {
             TCR_EL1 => self.tcr_el1 = value,
             MAIR_EL1 => self.mair_el1 = value,
             VBAR_EL1 => self.vbar_el1 = value,
+            TPIDR_EL1 => self.tpidr_el1 = value,
             SPSR_EL1 => self.spsr_el1 = value,
             ELR_EL1 => self.elr_el1 = value,
             SP_EL0 => self.sp_el0 = value,
@@ -161,9 +166,11 @@ mod tests {
         regs.write(SPSR_EL1, 0x3c5).unwrap();
         regs.write(ELR_EL1, 0x80000).unwrap();
         regs.write(SP_EL0, 0x90000).unwrap();
+        regs.write(TPIDR_EL1, 0xa0000).unwrap();
         assert_eq!(regs.read(SPSR_EL1).unwrap(), 0x3c5);
         assert_eq!(regs.read(ELR_EL1).unwrap(), 0x80000);
         assert_eq!(regs.read(SP_EL0).unwrap(), 0x90000);
+        assert_eq!(regs.read(TPIDR_EL1).unwrap(), 0xa0000);
         regs.write(SPSEL, 0).unwrap();
         assert_eq!(regs.read(SPSEL).unwrap(), 0);
         assert_eq!(regs.read(CTR_EL0).unwrap(), 0x8444_c004);
