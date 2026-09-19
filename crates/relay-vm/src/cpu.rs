@@ -369,6 +369,36 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // LSLV/LSRV/ASRV/RORV. Linux derives cache-line byte counts with a
+        // register shift after extracting CTR_EL0 fields.
+        if insn & 0x1fe0_f000 == 0x1ac0_2000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let amount = (self.x((insn >> 16) & 31) & u64::from(width - 1)) as u32;
+            let source = self.x((insn >> 5) & 31) & low_mask(width);
+            let result = match (insn >> 10) & 3 {
+                0 => source << amount,
+                1 => source >> amount,
+                2 => {
+                    if is_64 {
+                        ((source as i64) >> amount) as u64
+                    } else {
+                        ((source as u32 as i32) >> amount) as u32 as u64
+                    }
+                }
+                3 => {
+                    if is_64 {
+                        source.rotate_right(amount)
+                    } else {
+                        (source as u32).rotate_right(amount) as u64
+                    }
+                }
+                _ => unreachable!(),
+            };
+            self.set(insn & 31, result & low_mask(width));
+            self.pc = next;
+            return Ok(());
+        }
         // MOVN/MOVZ/MOVK, 32- and 64-bit forms.
         if insn & 0x1f80_0000 == 0x1280_0000 {
             let is_64 = insn & 0x8000_0000 != 0;
@@ -694,10 +724,15 @@ mod tests {
     fn ubfx_extracts_linux_cache_geometry_field() {
         let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
         memory.write(0, &0xd350_4c63u32.to_le_bytes()).unwrap(); // UBFX X3,X3,#16,#4
+        memory.write(4, &0x9ac3_2042u32.to_le_bytes()).unwrap(); // LSL X2,X2,X3
         let mut cpu = StaticCpu::new(memory, 0).unwrap();
         cpu.set_x(3, 0x000a_0000);
         cpu.step().unwrap();
         assert_eq!(cpu.x(3), 0xa);
+        cpu.set_x(2, 1);
+        cpu.set_x(3, 6);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(2), 64);
     }
 
     #[test]
