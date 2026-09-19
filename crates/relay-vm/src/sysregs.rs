@@ -12,6 +12,7 @@ pub(crate) const TPIDR_EL1: u16 = 0xc684;
 pub(crate) const CNTFRQ_EL0: u16 = 0xdf00;
 pub(crate) const CNTPCT_EL0: u16 = 0xdf01;
 pub(crate) const MIDR_EL1: u16 = 0xc000;
+pub(crate) const MPIDR_EL1: u16 = 0xc005;
 pub(crate) const ID_AA64PFR0_EL1: u16 = 0xc020;
 pub(crate) const ID_AA64DFR0_EL1: u16 = 0xc028;
 pub(crate) const ID_AA64ISAR0_EL1: u16 = 0xc030;
@@ -87,6 +88,7 @@ impl SysRegs {
             CNTFRQ_EL0 => Ok(self.counter_frequency),
             CNTPCT_EL0 => Ok(self.counter),
             MIDR_EL1 => Ok(0x410f_d0c0),
+            MPIDR_EL1 => Ok(0x8000_0000),
             ID_AA64PFR0_EL1 => Ok(0x11),
             ID_AA64DFR0_EL1 => Ok(0),
             ID_AA64ISAR0_EL1 | ID_AA64ISAR1_EL1 | ID_AA64ISAR2_EL1 => Ok(0),
@@ -129,7 +131,7 @@ impl SysRegs {
                     "StaticCpu SPSel value is invalid".into(),
                 ))
             }
-            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 | ID_AA64DFR0_EL1
+            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | MPIDR_EL1 | ID_AA64PFR0_EL1 | ID_AA64DFR0_EL1
             | ID_AA64ISAR0_EL1 | ID_AA64ISAR1_EL1 | ID_AA64ISAR2_EL1 | ID_AA64MMFR0_EL1
             | ID_AA64MMFR1_EL1 | ID_AA64MMFR2_EL1 | ID_AA64MMFR3_EL1 | CURRENT_EL | CTR_EL0
             | DCZID_EL0 => {
