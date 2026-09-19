@@ -181,7 +181,10 @@ impl GuestMemory {
             .checked_add(len)
             .filter(|end| *end <= self.guest_bytes && *end <= self.bytes.len())
             .ok_or_else(|| {
-                RelayError::Failed("guest physical memory access out of range".into())
+                RelayError::Failed(format!(
+                    "guest physical memory access out of range address={address:#x} len={len} memory={:#x}",
+                    self.guest_bytes
+                ))
             })?;
         Ok(start..end)
     }
