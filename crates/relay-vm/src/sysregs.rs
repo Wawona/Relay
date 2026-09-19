@@ -11,6 +11,8 @@ pub(crate) const CNTPCT_EL0: u16 = 0xdf01;
 pub(crate) const MIDR_EL1: u16 = 0xc000;
 pub(crate) const ID_AA64PFR0_EL1: u16 = 0xc020;
 pub(crate) const CURRENT_EL: u16 = 0xc212;
+pub(crate) const CTR_EL0: u16 = 0xd801;
+pub(crate) const DCZID_EL0: u16 = 0xd807;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SysRegs {
@@ -52,6 +54,11 @@ impl SysRegs {
             MIDR_EL1 => Ok(0x410f_d0c0),
             ID_AA64PFR0_EL1 => Ok(0x11),
             CURRENT_EL => Ok(1 << 2),
+            // Cortex-A57-compatible 64-byte I/D cache lines. Relay executes
+            // cache maintenance synchronously but Linux still requires
+            // architecturally coherent geometry during early boot.
+            CTR_EL0 => Ok(0x8444_c004),
+            DCZID_EL0 => Ok(4),
             _ => Err(RelayError::Failed(format!(
                 "StaticCpu unimplemented system register {reg:#06x}"
             ))),
@@ -64,7 +71,8 @@ impl SysRegs {
             TCR_EL1 => self.tcr_el1 = value,
             MAIR_EL1 => self.mair_el1 = value,
             VBAR_EL1 => self.vbar_el1 = value,
-            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 | CURRENT_EL => {
+            CNTFRQ_EL0 | CNTPCT_EL0 | MIDR_EL1 | ID_AA64PFR0_EL1 | CURRENT_EL | CTR_EL0
+            | DCZID_EL0 => {
                 return Err(RelayError::Failed(
                     "StaticCpu attempted write to read-only system register".into(),
                 ))
@@ -92,6 +100,8 @@ mod tests {
         assert_eq!(regs.read(CNTFRQ_EL0).unwrap(), 24_000_000);
         assert_eq!(regs.read(CNTPCT_EL0).unwrap(), 12);
         assert_eq!(regs.read(CURRENT_EL).unwrap(), 4);
+        assert_eq!(regs.read(CTR_EL0).unwrap(), 0x8444_c004);
+        assert_eq!(regs.read(DCZID_EL0).unwrap(), 4);
         assert!(regs.write(CNTFRQ_EL0, 1).is_err());
     }
 }
