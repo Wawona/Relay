@@ -189,10 +189,24 @@ impl StaticCpu {
                 | ((insn >> 5) & 7)) as u16;
             let rt = insn & 31;
             if insn & 0x0020_0000 != 0 {
-                self.set(rt, self.sysregs.read(reg)?);
+                let value = self.sysregs.read(reg).map_err(|error| {
+                    RelayError::Failed(format!("{error}; pc={pc:#x} word={insn:#010x}"))
+                })?;
+                self.set(rt, value);
             } else {
-                self.sysregs.write(reg, self.x(rt))?;
+                self.sysregs.write(reg, self.x(rt)).map_err(|error| {
+                    RelayError::Failed(format!("{error}; pc={pc:#x} word={insn:#010x}"))
+                })?;
             }
+            self.pc = next;
+            return Ok(());
+        }
+        // Immediate SPSel writes choose SP_EL0 or SP_EL1. Relay currently has
+        // one physical stack register, but preserving the selector keeps
+        // Linux's exception-entry state architecturally visible.
+        if matches!(insn, 0xd500_40bf | 0xd500_41bf) {
+            self.sysregs
+                .write(crate::sysregs::SPSEL, u64::from(insn == 0xd500_41bf))?;
             self.pc = next;
             return Ok(());
         }
