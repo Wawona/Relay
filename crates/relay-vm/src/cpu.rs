@@ -753,7 +753,7 @@ impl StaticCpu {
             return Ok(());
         }
         // Relay performs page-table walks directly and has no cached TLB.
-        if insn == 0xd508_871f {
+        if matches!(insn, 0xd508_871f | 0xd508_751f) {
             self.pc = next;
             return Ok(());
         }
