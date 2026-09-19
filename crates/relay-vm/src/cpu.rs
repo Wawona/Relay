@@ -391,6 +391,44 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // SBFM/BFM/UBFM and their ASR/BFI/BFXIL/LSL/LSR/UBFX aliases.
+        if insn & 0x1f80_0000 == 0x1300_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let width_mask = low_mask(width);
+            let n = (insn >> 22) & 1;
+            let immr = (insn >> 16) & 63;
+            let imms = (insn >> 10) & 63;
+            if n != u32::from(is_64) || immr >= width || imms >= width {
+                return self.unsupported(pc, insn);
+            }
+            let rd = insn & 31;
+            let source = self.x((insn >> 5) & 31) & width_mask;
+            let result = if imms >= immr {
+                let bits = imms - immr + 1;
+                let field = (source >> immr) & low_mask(bits);
+                match (insn >> 29) & 3 {
+                    0 => sign_extend_width(field, bits, width),
+                    1 => (self.x(rd) & !low_mask(bits)) | field,
+                    2 => field,
+                    _ => return self.unsupported(pc, insn),
+                }
+            } else {
+                let bits = imms + 1;
+                let lsb = width - immr;
+                let mask = low_mask(bits) << lsb;
+                let field = (source << lsb) & mask;
+                match (insn >> 29) & 3 {
+                    0 => sign_extend_width(field, lsb + bits, width),
+                    1 => (self.x(rd) & !mask) | field,
+                    2 => field,
+                    _ => return self.unsupported(pc, insn),
+                }
+            };
+            self.set(rd, result & width_mask);
+            self.pc = next;
+            return Ok(());
+        }
         // LDR literal, integer 32- and 64-bit forms.
         if matches!(insn & 0xff00_0000, 0x1800_0000 | 0x5800_0000) {
             let address =
@@ -517,6 +555,22 @@ fn sign_extend(value: u64, bits: u32) -> i64 {
     ((value << (64 - bits)) as i64) >> (64 - bits)
 }
 
+fn low_mask(bits: u32) -> u64 {
+    if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    }
+}
+
+fn sign_extend_width(value: u64, bits: u32, width: u32) -> u64 {
+    if bits == 64 || value & (1u64 << (bits - 1)) == 0 {
+        value
+    } else {
+        value | (low_mask(width) & !low_mask(bits))
+    }
+}
+
 fn decode_logical_immediate(is_64: bool, n: u32, immr: u32, imms: u32) -> Option<u64> {
     if !is_64 && n != 0 {
         return None;
@@ -634,6 +688,16 @@ mod tests {
         assert_eq!(cpu.nzcv & 4, 4);
         cpu.step().unwrap();
         assert_eq!(cpu.x(19), 0);
+    }
+
+    #[test]
+    fn ubfx_extracts_linux_cache_geometry_field() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xd350_4c63u32.to_le_bytes()).unwrap(); // UBFX X3,X3,#16,#4
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(3, 0x000a_0000);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(3), 0xa);
     }
 
     #[test]
