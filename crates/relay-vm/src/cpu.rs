@@ -285,6 +285,36 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // AND/ORR/EOR/ANDS immediate. Linux uses the TST alias here while
+        // selecting its early exception-level and cache path.
+        if insn & 0x1f80_0000 == 0x1200_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let immediate = decode_logical_immediate(
+                is_64,
+                (insn >> 22) & 1,
+                (insn >> 16) & 63,
+                (insn >> 10) & 63,
+            )
+            .ok_or_else(|| {
+                RelayError::Failed(format!(
+                    "StaticCpu invalid logical immediate pc={pc:#x} word={insn:#010x}"
+                ))
+            })?;
+            let left = self.x((insn >> 5) & 31);
+            let result = match (insn >> 29) & 3 {
+                0 | 3 => left & immediate,
+                1 => left | immediate,
+                2 => left ^ immediate,
+                _ => unreachable!(),
+            } & if is_64 { u64::MAX } else { u32::MAX as u64 };
+            self.set(insn & 31, result);
+            if (insn >> 29) & 3 == 3 {
+                self.nzcv = ((result >> (width - 1)) as u8) << 3 | ((result == 0) as u8) << 2;
+            }
+            self.pc = next;
+            return Ok(());
+        }
         // AND/ORR/EOR shifted register. MOV aliases are ORR with XZR.
         if insn & 0x1f20_0000 == 0x0a00_0000 {
             let is_64 = insn & 0x8000_0000 != 0;
@@ -463,6 +493,45 @@ fn sign_extend(value: u64, bits: u32) -> i64 {
     ((value << (64 - bits)) as i64) >> (64 - bits)
 }
 
+fn decode_logical_immediate(is_64: bool, n: u32, immr: u32, imms: u32) -> Option<u64> {
+    if !is_64 && n != 0 {
+        return None;
+    }
+    let encoded = (n << 6) | ((!imms) & 0x3f);
+    let len = 31u32.checked_sub(encoded.leading_zeros())?;
+    if len < 1 {
+        return None;
+    }
+    let levels = (1u32 << len) - 1;
+    let size = 1u32 << len;
+    let set_bits = imms & levels;
+    if set_bits == levels {
+        return None;
+    }
+    let rotate = immr & levels;
+    let element_mask = if size == 64 {
+        u64::MAX
+    } else {
+        (1u64 << size) - 1
+    };
+    let ones = if set_bits == 63 {
+        u64::MAX
+    } else {
+        (1u64 << (set_bits + 1)) - 1
+    };
+    let element = if rotate == 0 {
+        ones
+    } else {
+        ((ones >> rotate) | (ones << (size - rotate))) & element_mask
+    };
+    let width = if is_64 { 64 } else { 32 };
+    let mut result = 0;
+    for offset in (0..width).step_by(size as usize) {
+        result |= element << offset;
+    }
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +591,20 @@ mod tests {
         cpu.step().unwrap();
         assert_eq!(cpu.pc, 12);
         assert!(cpu.step().unwrap_err().to_string().contains("pc=0xc"));
+    }
+
+    #[test]
+    fn tst_logical_immediate_sets_linux_boot_condition_flags() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xf27e_027fu32.to_le_bytes()).unwrap(); // TST X19,#4
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(19, 4);
+        cpu.step().unwrap();
+        assert_eq!(cpu.nzcv & 4, 0);
+        cpu.pc = 0;
+        cpu.set_x(19, 0);
+        cpu.step().unwrap();
+        assert_eq!(cpu.nzcv & 4, 4);
     }
 
     #[test]
