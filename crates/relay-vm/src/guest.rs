@@ -5,7 +5,7 @@ use crate::dtb;
 use crate::page_translate::PageTranslate;
 use relay_core::{GuestArtifact, GuestManifest, GuestPageSize, HostPageSize, RelayError};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read};
+use std::{fs, io::Read, path::PathBuf};
 
 #[allow(dead_code)] // Staged now; consumed by the Linux boot loader next.
 pub struct LoadedGuest {
@@ -14,6 +14,7 @@ pub struct LoadedGuest {
     pub kernel: Vec<u8>,
     pub initrd: Option<Vec<u8>>,
     pub rootfs: Vec<u8>,
+    pub rootfs_path: PathBuf,
 }
 
 /// AArch64 Linux entry registers and physical placements. Creating this state
@@ -44,16 +45,20 @@ pub fn prepare_linux_boot(
     // The immutable rootfs is a virtio-block backing store, never a second
     // in-RAM copy.  Verify it before allocating RAM, then stage only the
     // executable boot artifacts into the single GuestMemory arena.
-    let page_size = validate_artifacts(manifest)?;
+    let page_size = manifest.validate()?;
+    let kernel = read_artifact("kernel", &manifest.kernel)?;
+    let initrd = manifest
+        .initrd
+        .as_ref()
+        .map(|artifact| read_artifact("initrd", artifact))
+        .transpose()?;
+    verify_artifact("rootfs", &manifest.rootfs)?;
     let mut guest = LoadedGuest {
         page_size,
         memory: GuestMemory::allocate(page_size, manifest.memory_bytes)?,
-        kernel: read_artifact("kernel", &manifest.kernel)?,
-        initrd: manifest
-            .initrd
-            .as_ref()
-            .map(|artifact| read_artifact("initrd", artifact))
-            .transpose()?,
+        kernel,
+        initrd,
+        rootfs_path: PathBuf::from(&manifest.rootfs.path),
         // `start_ios` attaches this verified artifact through virtio-block.
         // Keeping it empty here prevents a rootfs-sized duplicate allocation.
         rootfs: Vec::new(),
@@ -178,7 +183,10 @@ impl GuestMemory {
             .checked_add(len)
             .filter(|end| *end <= self.guest_bytes && *end <= self.bytes.len())
             .ok_or_else(|| {
-                RelayError::Failed("guest physical memory access out of range".into())
+                RelayError::Failed(format!(
+                    "guest physical memory access out of range address={address:#x} len={len} memory={:#x}",
+                    self.guest_bytes
+                ))
             })?;
         Ok(start..end)
     }
@@ -200,6 +208,7 @@ pub fn load(manifest: &GuestManifest) -> Result<LoadedGuest, RelayError> {
         kernel,
         initrd,
         rootfs,
+        rootfs_path: PathBuf::from(&manifest.rootfs.path),
     })
 }
 

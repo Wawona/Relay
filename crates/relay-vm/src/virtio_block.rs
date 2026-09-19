@@ -3,15 +3,21 @@
 #![allow(dead_code)] // The static CPU bus will expose this device next.
 
 use relay_core::{DiskResizePlan, RelayError};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs::File, os::unix::fs::FileExt, path::Path};
 
 const SECTOR_BYTES: usize = 512;
 const GIB: u64 = 1024 * 1024 * 1024;
 
 pub(crate) struct BlockDevice {
-    base: Vec<u8>,
+    base: Backing,
+    base_bytes: u64,
     sectors: u64,
     overlay: BTreeMap<u64, [u8; SECTOR_BYTES]>,
+}
+
+enum Backing {
+    Memory(Vec<u8>),
+    File(File),
 }
 
 pub(crate) struct Descriptor {
@@ -73,7 +79,30 @@ impl BlockDevice {
             ));
         }
         Ok(Self {
-            base,
+            base_bytes: base.len() as u64,
+            base: Backing::Memory(base),
+            sectors: bytes / SECTOR_BYTES as u64,
+            overlay: BTreeMap::new(),
+        })
+    }
+    pub(crate) fn from_file(path: &Path, size_gib: u32) -> Result<Self, RelayError> {
+        let file = File::open(path)
+            .map_err(|error| RelayError::Failed(format!("cannot open rootfs backing: {error}")))?;
+        let base_bytes = file
+            .metadata()
+            .map_err(|error| RelayError::Failed(format!("cannot inspect rootfs backing: {error}")))?
+            .len();
+        let bytes = u64::from(size_gib)
+            .checked_mul(GIB)
+            .ok_or_else(|| RelayError::Failed("disk capacity overflow".into()))?;
+        if size_gib < DiskResizePlan::MIN_GIB || base_bytes > bytes {
+            return Err(RelayError::Failed(
+                "rootfs backing does not fit virtual disk capacity".into(),
+            ));
+        }
+        Ok(Self {
+            base: Backing::File(file),
+            base_bytes,
             sectors: bytes / SECTOR_BYTES as u64,
             overlay: BTreeMap::new(),
         })
@@ -85,14 +114,38 @@ impl BlockDevice {
         if let Some(data) = self.overlay.get(&sector) {
             return Ok(*data);
         }
-        let start = usize::try_from(sector)
-            .ok()
-            .and_then(|sector| sector.checked_mul(SECTOR_BYTES))
+        let start = sector
+            .checked_mul(SECTOR_BYTES as u64)
             .ok_or_else(|| RelayError::Failed("virtio block address overflow".into()))?;
         let mut data = [0; SECTOR_BYTES];
-        if start < self.base.len() {
-            let end = (start + SECTOR_BYTES).min(self.base.len());
-            data[..end - start].copy_from_slice(&self.base[start..end]);
+        let available = self
+            .base_bytes
+            .saturating_sub(start)
+            .min(SECTOR_BYTES as u64) as usize;
+        if available != 0 {
+            match &self.base {
+                Backing::Memory(base) => {
+                    let start = usize::try_from(start)
+                        .map_err(|_| RelayError::Failed("virtio block address overflow".into()))?;
+                    data[..available].copy_from_slice(&base[start..start + available]);
+                }
+                Backing::File(file) => {
+                    let mut read = 0;
+                    while read < available {
+                        let count = file
+                            .read_at(&mut data[read..available], start + read as u64)
+                            .map_err(|error| {
+                                RelayError::Failed(format!("cannot read rootfs backing: {error}"))
+                            })?;
+                        if count == 0 {
+                            return Err(RelayError::Failed(
+                                "rootfs backing ended before declared size".into(),
+                            ));
+                        }
+                        read += count;
+                    }
+                }
+            }
         }
         Ok(data)
     }
@@ -116,6 +169,9 @@ impl BlockDevice {
         }
         self.sectors = plan.target_gib as u64 * GIB / SECTOR_BYTES as u64;
         Ok(())
+    }
+    pub(crate) fn sectors(&self) -> u64 {
+        self.sectors
     }
 
     /// Process a three-descriptor virtio-blk chain: request header, data, status.
@@ -343,6 +399,7 @@ mod validation_tests {
 mod tests {
     use super::*;
     use relay_core::GuestPageSize;
+    use std::io::Write;
     #[test]
     fn overlay_preserves_base_and_grows_sparsely() {
         let mut disk = BlockDevice::new(vec![7; SECTOR_BYTES], 4).unwrap();
@@ -352,6 +409,18 @@ mod tests {
         disk.resize(DiskResizePlan::from_slider(4, 8, 16, false).unwrap())
             .unwrap();
         assert_eq!(disk.read_sector(9_000_000).unwrap()[0], 0);
+    }
+    #[test]
+    fn file_backing_reads_without_loading_rootfs_into_ram() {
+        let path = std::env::temp_dir().join(format!("relay-block-{}", std::process::id()));
+        File::create(&path)
+            .unwrap()
+            .write_all(&[7; SECTOR_BYTES])
+            .unwrap();
+        let disk = BlockDevice::from_file(&path, 4).unwrap();
+        assert_eq!(disk.read_sector(0).unwrap(), [7; SECTOR_BYTES]);
+        assert_eq!(disk.read_sector(1).unwrap(), [0; SECTOR_BYTES]);
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn parses_guest_chain_and_rejects_loop() {
