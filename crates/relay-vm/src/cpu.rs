@@ -3,12 +3,9 @@
 //! The CPU owns one GuestMemory arena and never allocates in `step`.  Decoder
 //! misses are terminal and include the guest PC plus original instruction.
 
-use crate::{
-    bus::{Bus, PL011_BASE},
-    guest::GuestMemory,
-    sysregs::SysRegs,
-};
+use crate::{bus::Bus, guest::GuestMemory, sysregs::SysRegs};
 use relay_core::RelayError;
+use std::path::Path;
 
 pub(crate) struct StaticCpu {
     x: [u64; 31],
@@ -22,13 +19,23 @@ pub(crate) struct StaticCpu {
 
 impl StaticCpu {
     pub(crate) fn new(memory: GuestMemory, entry_pc: u64) -> Result<Self, RelayError> {
+        Self::with_bus(memory, entry_pc, Bus::default())
+    }
+    pub(crate) fn new_with_block(
+        memory: GuestMemory,
+        entry_pc: u64,
+        rootfs: &Path,
+    ) -> Result<Self, RelayError> {
+        Self::with_bus(memory, entry_pc, Bus::with_block(rootfs)?)
+    }
+    fn with_bus(memory: GuestMemory, entry_pc: u64, bus: Bus) -> Result<Self, RelayError> {
         Ok(Self {
             x: [0; 31],
             sp: 0,
             nzcv: 0,
             pc: entry_pc,
             memory,
-            bus: Bus::default(),
+            bus,
             sysregs: SysRegs::new(24_000_000)?,
         })
     }
@@ -106,7 +113,7 @@ impl StaticCpu {
     }
     fn read32(&self, address: u64) -> Result<u32, RelayError> {
         let physical = self.physical(address)?;
-        if (PL011_BASE..PL011_BASE + 0x1000).contains(&physical) {
+        if self.bus.handles(physical) {
             return self.bus.read32(physical);
         }
         let mut bytes = [0; 4];
@@ -115,8 +122,10 @@ impl StaticCpu {
     }
     fn write32(&mut self, address: u64, value: u32) -> Result<(), RelayError> {
         let physical = self.physical(address)?;
-        if (PL011_BASE..PL011_BASE + 0x1000).contains(&physical) {
-            return self.bus.write32(physical, value);
+        if self.bus.handles(physical) {
+            self.bus.write32(physical, value)?;
+            self.bus.service(&mut self.memory)?;
+            return Ok(());
         }
         self.memory.write(physical, &value.to_le_bytes())
     }
@@ -1089,7 +1098,7 @@ mod tests {
         cpu.memory.write(4, &0xf940_0002u32.to_le_bytes()).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.x(2), 0xfeed_face);
-        cpu.set_x(0, PL011_BASE);
+        cpu.set_x(0, crate::bus::PL011_BASE);
         cpu.pc = 8;
         cpu.step().unwrap();
         assert_eq!(cpu.bus.console(), b"R");

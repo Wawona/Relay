@@ -5,7 +5,7 @@ use crate::dtb;
 use crate::page_translate::PageTranslate;
 use relay_core::{GuestArtifact, GuestManifest, GuestPageSize, HostPageSize, RelayError};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read};
+use std::{fs, io::Read, path::PathBuf};
 
 #[allow(dead_code)] // Staged now; consumed by the Linux boot loader next.
 pub struct LoadedGuest {
@@ -14,6 +14,7 @@ pub struct LoadedGuest {
     pub kernel: Vec<u8>,
     pub initrd: Option<Vec<u8>>,
     pub rootfs: Vec<u8>,
+    pub rootfs_path: PathBuf,
 }
 
 /// AArch64 Linux entry registers and physical placements. Creating this state
@@ -57,6 +58,7 @@ pub fn prepare_linux_boot(
         memory: GuestMemory::allocate(page_size, manifest.memory_bytes)?,
         kernel,
         initrd,
+        rootfs_path: PathBuf::from(&manifest.rootfs.path),
         // `start_ios` attaches this verified artifact through virtio-block.
         // Keeping it empty here prevents a rootfs-sized duplicate allocation.
         rootfs: Vec::new(),
@@ -206,6 +208,7 @@ pub fn load(manifest: &GuestManifest) -> Result<LoadedGuest, RelayError> {
         kernel,
         initrd,
         rootfs,
+        rootfs_path: PathBuf::from(&manifest.rootfs.path),
     })
 }
 

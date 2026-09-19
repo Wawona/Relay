@@ -170,6 +170,9 @@ impl BlockDevice {
         self.sectors = plan.target_gib as u64 * GIB / SECTOR_BYTES as u64;
         Ok(())
     }
+    pub(crate) fn sectors(&self) -> u64 {
+        self.sectors
+    }
 
     /// Process a three-descriptor virtio-blk chain: request header, data, status.
     pub(crate) fn process(

@@ -66,7 +66,8 @@ pub fn prepare(manifest: &GuestManifest) -> Result<LinuxBootState, RelayError> {
             "ARM64 Image has an empty entry instruction".into(),
         ));
     }
-    let mut cpu = StaticCpu::new(guest.memory, boot.entry_pc)?;
+    let rootfs_path = guest.rootfs_path.clone();
+    let mut cpu = StaticCpu::new_with_block(guest.memory, boot.entry_pc, &rootfs_path)?;
     // ARM64 Linux boot protocol: x0 is the physical DTB address, the other
     // argument registers are zero on entry.  Follow real Image control flow
     // until a handler is missing; do not return a placeholder frame.
