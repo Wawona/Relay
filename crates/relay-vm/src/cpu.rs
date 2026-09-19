@@ -12,6 +12,7 @@ use relay_core::RelayError;
 
 pub(crate) struct StaticCpu {
     x: [u64; 31],
+    sp: u64,
     nzcv: u8,
     pub(crate) pc: u64,
     memory: GuestMemory,
@@ -23,6 +24,7 @@ impl StaticCpu {
     pub(crate) fn new(memory: GuestMemory, entry_pc: u64) -> Result<Self, RelayError> {
         Ok(Self {
             x: [0; 31],
+            sp: 0,
             nzcv: 0,
             pc: entry_pc,
             memory,
@@ -44,6 +46,20 @@ impl StaticCpu {
     }
     fn set(&mut self, register: u32, value: u64) {
         if register != 31 {
+            self.x[register as usize] = value;
+        }
+    }
+    fn x_or_sp(&self, register: u32) -> u64 {
+        if register == 31 {
+            self.sp
+        } else {
+            self.x[register as usize]
+        }
+    }
+    fn set_x_or_sp(&mut self, register: u32, value: u64) {
+        if register == 31 {
+            self.sp = value;
+        } else {
             self.x[register as usize] = value;
         }
     }
@@ -202,67 +218,128 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
-        // ADD/SUB immediate, 64-bit form only.
-        if insn & 0x1f00_0000 == 0x1100_0000 && insn & 0x8000_0000 != 0 {
+        // TBZ/TBNZ. The high bit of the tested bit index is also the
+        // instruction's width selector.
+        if insn & 0x7e00_0000 == 0x3600_0000 {
+            let bit = ((insn >> 19) & 31) | ((insn >> 26) & 32);
+            let value = self.x(insn & 31);
+            let nonzero_branch = insn & (1 << 24) != 0;
+            let take = (((value >> bit) & 1) != 0) == nonzero_branch;
+            let imm = sign_extend(((insn >> 5) & 0x3fff) as u64, 14) << 2;
+            self.pc = if take {
+                pc.wrapping_add(imm as u64)
+            } else {
+                next
+            };
+            return Ok(());
+        }
+        // BR/BLR/RET. Linux uses register-indirect calls while the MMU is off.
+        if matches!(insn & 0xffff_fc1f, 0xd61f_0000 | 0xd63f_0000 | 0xd65f_0000) {
+            if insn & 0xffff_fc1f == 0xd63f_0000 {
+                self.set(30, next);
+            }
+            self.pc = self.x((insn >> 5) & 31);
+            return Ok(());
+        }
+        // ADD/SUB immediate, 32- and 64-bit forms. Register 31 denotes SP for
+        // the source and for a non-flag-setting destination.
+        if insn & 0x1f00_0000 == 0x1100_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let set_flags = insn & (1 << 29) != 0;
+            let subtract = insn & (1 << 30) != 0;
             let shift = if insn & (1 << 22) != 0 { 12 } else { 0 };
             let immediate = (((insn >> 10) & 0xfff) as u64) << shift;
-            let value = if insn & (1 << 30) != 0 {
-                self.x((insn >> 5) & 31).wrapping_sub(immediate)
+            let mask = if is_64 { u64::MAX } else { u32::MAX as u64 };
+            let left = self.x_or_sp((insn >> 5) & 31) & mask;
+            let value = if subtract {
+                left.wrapping_sub(immediate) & mask
             } else {
-                self.x((insn >> 5) & 31).wrapping_add(immediate)
+                left.wrapping_add(immediate) & mask
             };
-            self.set(insn & 31, value);
-            if insn & (1 << 29) != 0 {
-                let left = self.x((insn >> 5) & 31);
-                let sub = insn & (1 << 30) != 0;
-                let result = value;
-                let n = (result >> 63) != 0;
-                let z = result == 0;
-                let c = if sub {
+            if set_flags {
+                self.set(insn & 31, value);
+                let sign = if is_64 { 63 } else { 31 };
+                let n = (value >> sign) != 0;
+                let z = value == 0;
+                let c = if subtract {
                     left >= immediate
                 } else {
-                    left.checked_add(immediate).is_some()
+                    left.checked_add(immediate).is_some_and(|sum| sum <= mask)
                 };
-                let v = if sub {
-                    ((left ^ immediate) & (left ^ result) >> 63) != 0
+                let v = if subtract {
+                    (((left ^ immediate) & (left ^ value)) >> sign) != 0
                 } else {
-                    (!(left ^ immediate) & (left ^ result) >> 63) != 0
+                    ((!(left ^ immediate) & (left ^ value)) >> sign) != 0
                 };
                 self.nzcv = (n as u8) << 3 | (z as u8) << 2 | (c as u8) << 1 | v as u8;
+            } else {
+                self.set_x_or_sp(insn & 31, value);
             }
             self.pc = next;
             return Ok(());
         }
-        // AND/ORR/EOR register, LSL only.  MOV aliases are ORR with XZR.
-        if insn & 0x1f20_0000 == 0x0a00_0000 && insn & 0x8000_0000 != 0 && (insn >> 22) & 3 == 0 {
+        // AND/ORR/EOR shifted register. MOV aliases are ORR with XZR.
+        if insn & 0x1f20_0000 == 0x0a00_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let amount = (insn >> 10) & 63;
+            if !is_64 && amount >= 32 {
+                return self.unsupported(pc, insn);
+            }
             let left = self.x((insn >> 5) & 31);
-            let right = self.x((insn >> 16) & 31) << ((insn >> 10) & 63);
+            let source = self.x((insn >> 16) & 31);
+            let right = match (insn >> 22) & 3 {
+                0 => source << amount,
+                1 => source >> amount,
+                2 => ((source as i64) >> amount) as u64,
+                _ => return self.unsupported(pc, insn),
+            };
+            let mask = if is_64 { u64::MAX } else { u32::MAX as u64 };
             let result = match (insn >> 29) & 3 {
                 0 | 3 => left & right,
                 1 => left | right,
                 2 => left ^ right,
                 _ => unreachable!(),
-            };
+            } & mask;
             self.set(insn & 31, result);
             if (insn >> 29) & 3 == 3 {
-                self.nzcv = ((result >> 63) as u8) << 3 | ((result == 0) as u8) << 2;
+                self.nzcv = ((result >> (width - 1)) as u8) << 3 | ((result == 0) as u8) << 2;
             }
             self.pc = next;
             return Ok(());
         }
-        // MOVZ/MOVK, 64-bit forms.
-        if insn & 0x1f80_0000 == 0x1280_0000 && insn & 0x8000_0000 != 0 {
+        // MOVN/MOVZ/MOVK, 32- and 64-bit forms.
+        if insn & 0x1f80_0000 == 0x1280_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
             let rd = insn & 31;
             let shift = ((insn >> 21) & 3) * 16;
+            if !is_64 && shift >= 32 {
+                return self.unsupported(pc, insn);
+            }
             let imm = (((insn >> 5) & 0xffff) as u64) << shift;
+            let mask = if is_64 { u64::MAX } else { u32::MAX as u64 };
             match (insn >> 29) & 3 {
-                2 => self.set(rd, imm),
+                0 => self.set(rd, (!imm) & mask),
+                2 => self.set(rd, imm & mask),
                 3 => {
-                    let mask = 0xffffu64 << shift;
-                    self.set(rd, (self.x(rd) & !mask) | imm);
+                    let halfword_mask = 0xffffu64 << shift;
+                    self.set(rd, ((self.x(rd) & !halfword_mask) | imm) & mask);
                 }
                 _ => return self.unsupported(pc, insn),
             }
+            self.pc = next;
+            return Ok(());
+        }
+        // LDR literal, integer 32- and 64-bit forms.
+        if matches!(insn & 0xff00_0000, 0x1800_0000 | 0x5800_0000) {
+            let address =
+                pc.wrapping_add((sign_extend(((insn >> 5) & 0x7ffff) as u64, 19) << 2) as u64);
+            let value = if insn & 0x4000_0000 != 0 {
+                self.read64(address)?
+            } else {
+                self.read32(address)? as u64
+            };
+            self.set(insn & 31, value);
             self.pc = next;
             return Ok(());
         }
@@ -272,7 +349,7 @@ impl StaticCpu {
             let is_64 = class & 0x4000_0000 != 0;
             let load = class & 0x0040_0000 != 0;
             let offset = ((insn >> 10) & 0xfff) as u64 * if is_64 { 8 } else { 4 };
-            let address = self.x((insn >> 5) & 31).wrapping_add(offset);
+            let address = self.x_or_sp((insn >> 5) & 31).wrapping_add(offset);
             let rt = insn & 31;
             if load {
                 self.set(
@@ -291,11 +368,54 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
-        // LDP/STP X registers, signed offset mode used by early stack setup.
-        if matches!(insn & 0xffc0_0000, 0xa900_0000 | 0xa940_0000) {
+        // LDR/STR unscaled, pre-indexed and post-indexed, 32/64-bit forms.
+        if insn & 0x3b20_0000 == 0x3800_0000 && matches!(insn >> 30, 2 | 3) && (insn >> 10) & 3 != 2
+        {
+            let is_64 = insn >> 30 == 3;
             let load = insn & 0x0040_0000 != 0;
+            let mode = (insn >> 10) & 3;
+            let offset = sign_extend(((insn >> 12) & 0x1ff) as u64, 9);
+            let rn = (insn >> 5) & 31;
+            let base = self.x_or_sp(rn);
+            let address = if mode == 1 {
+                base
+            } else {
+                base.wrapping_add(offset as u64)
+            };
+            let rt = insn & 31;
+            if load {
+                self.set(
+                    rt,
+                    if is_64 {
+                        self.read64(address)?
+                    } else {
+                        self.read32(address)? as u64
+                    },
+                );
+            } else if is_64 {
+                self.write64(address, self.x(rt))?;
+            } else {
+                self.write32(address, self.x(rt) as u32)?;
+            }
+            if mode != 0 {
+                self.set_x_or_sp(rn, base.wrapping_add(offset as u64));
+            }
+            self.pc = next;
+            return Ok(());
+        }
+        // LDP/STP X registers in post-index, signed-offset and pre-index modes.
+        if insn & 0x3e00_0000 == 0x2800_0000 && insn >> 30 == 2 && matches!((insn >> 23) & 3, 1..=3)
+        {
+            let load = insn & 0x0040_0000 != 0;
+            let mode = (insn >> 23) & 3;
             let offset = sign_extend(((insn >> 15) & 0x7f) as u64, 7) * 8;
-            let address = self.x((insn >> 5) & 31).wrapping_add(offset as u64);
+            let rn = (insn >> 5) & 31;
+            let base = self.x_or_sp(rn);
+            let address = if mode == 1 {
+                base
+            } else {
+                base.wrapping_add(offset as u64)
+            };
             let rt = insn & 31;
             let rt2 = (insn >> 10) & 31;
             if load {
@@ -306,6 +426,9 @@ impl StaticCpu {
             } else {
                 self.write64(address, self.x(rt))?;
                 self.write64(address + 8, self.x(rt2))?;
+            }
+            if matches!(mode, 1 | 3) {
+                self.set_x_or_sp(rn, base.wrapping_add(offset as u64));
             }
             self.pc = next;
             return Ok(());
@@ -319,11 +442,6 @@ impl StaticCpu {
         // DSB/DMB/ISB are ordering points in this single-threaded interpreter.
         if matches!(insn & 0xffff_f0ff, 0xd503_309f | 0xd503_30bf | 0xd503_30df) {
             self.pc = next;
-            return Ok(());
-        }
-        // RET Xn (RET is an alias of BR with a constrained encoding).
-        if insn & 0xffff_fc1f == 0xd65f_0000 {
-            self.pc = self.x((insn >> 5) & 31);
             return Ok(());
         }
         self.unsupported(pc, insn)
@@ -403,5 +521,60 @@ mod tests {
         let mut cpu = StaticCpu::new(memory, 0).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.x(0), 24_000_000);
+    }
+
+    #[test]
+    fn linux_entry_stack_pairs_preserve_sp_and_registers() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        for (offset, instruction) in [
+            (0, 0x9100_003f_u32), // MOV SP,X1
+            (4, 0xa9bf_07f5),     // STP X21,X1,[SP,#-16]!
+            (8, 0xa8c1_07f5),     // LDP X21,X1,[SP],#16
+        ] {
+            memory.write(offset, &instruction.to_le_bytes()).unwrap();
+        }
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(1, 0x800);
+        cpu.set_x(21, 0xfeed_face_cafe_beef);
+        cpu.step().unwrap();
+        assert_eq!(cpu.sp, 0x800);
+        cpu.step().unwrap();
+        assert_eq!(cpu.sp, 0x7f0);
+        cpu.set_x(1, 0);
+        cpu.set_x(21, 0);
+        cpu.step().unwrap();
+        assert_eq!(cpu.sp, 0x800);
+        assert_eq!(cpu.x(1), 0x800);
+        assert_eq!(cpu.x(21), 0xfeed_face_cafe_beef);
+    }
+
+    #[test]
+    fn linux_entry_bit_branches_and_literal_load_execute() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x3600_00b3_u32.to_le_bytes()).unwrap(); // TBZ X19,#0,+20
+        memory.write(20, &0x5800_00a2_u32.to_le_bytes()).unwrap(); // LDR X2,+20
+        memory
+            .write(40, &0x0123_4567_89ab_cdef_u64.to_le_bytes())
+            .unwrap();
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(19, 0);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc, 20);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(2), 0x0123_4567_89ab_cdef);
+    }
+
+    #[test]
+    fn indirect_call_and_return_preserve_link_register() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xd63f_0040_u32.to_le_bytes()).unwrap(); // BLR X2
+        memory.write(16, &0xd65f_03c0_u32.to_le_bytes()).unwrap(); // RET
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(2, 16);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc, 16);
+        assert_eq!(cpu.x(30), 4);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc, 4);
     }
 }
