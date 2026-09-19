@@ -199,7 +199,7 @@ impl StaticCpu {
             return Ok(());
         }
         // ADR/ADRP.
-        if insn & 0x9f00_0000 == 0x1000_0000 {
+        if insn & 0x1f00_0000 == 0x1000_0000 {
             let imm = sign_extend(
                 ((((insn >> 5) & 0x7ffff) << 2) | ((insn >> 29) & 3)) as u64,
                 21,
