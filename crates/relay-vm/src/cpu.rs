@@ -226,6 +226,17 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // DAIFSet/DAIFClr immediate forms used by local interrupt masking.
+        if insn & 0xffff_f0df == 0xd503_40df {
+            let mask = u64::from((insn >> 8) & 15) << 6;
+            self.sysregs.daif = if insn & (1 << 5) == 0 {
+                self.sysregs.daif | mask
+            } else {
+                self.sysregs.daif & !mask
+            };
+            self.pc = next;
+            return Ok(());
+        }
         // Exception return through the EL1 state Linux prepared. Interrupt
         // masks/mode remain guest state; instruction flow resumes at ELR_EL1.
         if insn == 0xd69f_03e0 {
@@ -1338,6 +1349,18 @@ mod tests {
         cpu.step().unwrap();
         assert_eq!(cpu.sysregs.spsr_el1, 0x3c5);
         assert_eq!(cpu.pc, 0x100);
+    }
+
+    #[test]
+    fn daif_immediates_preserve_interrupt_mask_state() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0xd503_42ffu32.to_le_bytes()).unwrap(); // MSR DAIFClr,#2
+        memory.write(4, &0xd503_42dfu32.to_le_bytes()).unwrap(); // MSR DAIFSet,#2
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.sysregs.daif & 0x80, 0);
+        cpu.step().unwrap();
+        assert_eq!(cpu.sysregs.daif & 0x80, 0x80);
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub(crate) const SP_EL0: u16 = 0xc208;
 pub(crate) const SPSEL: u16 = 0xc210;
 pub(crate) const CTR_EL0: u16 = 0xd801;
 pub(crate) const DCZID_EL0: u16 = 0xd807;
+pub(crate) const DAIF: u16 = 0xda11;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SysRegs {
@@ -45,6 +46,7 @@ pub(crate) struct SysRegs {
     pub elr_el1: u64,
     pub sp_el0: u64,
     pub mdscr_el1: u64,
+    pub daif: u64,
     spsel: u64,
     counter: u64,
     counter_frequency: u64,
@@ -67,6 +69,7 @@ impl SysRegs {
             elr_el1: 0,
             sp_el0: 0,
             mdscr_el1: 0,
+            daif: 0x3c0,
             spsel: 1,
             counter: 0,
             counter_frequency,
@@ -106,6 +109,7 @@ impl SysRegs {
             // architecturally coherent geometry during early boot.
             CTR_EL0 => Ok(0x8444_c004),
             DCZID_EL0 => Ok(4),
+            DAIF => Ok(self.daif),
             _ => Err(RelayError::Failed(format!(
                 "StaticCpu unimplemented system register {reg:#06x}"
             ))),
@@ -125,6 +129,7 @@ impl SysRegs {
             ELR_EL1 => self.elr_el1 = value,
             SP_EL0 => self.sp_el0 = value,
             MDSCR_EL1 => self.mdscr_el1 = value,
+            DAIF => self.daif = value & 0x3c0,
             SPSEL if value <= 1 => self.spsel = value,
             SPSEL => {
                 return Err(RelayError::Failed(
