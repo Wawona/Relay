@@ -435,6 +435,60 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // ADD/SUB extended register. Linux commonly folds a signed 32-bit
+        // index into a 64-bit kernel pointer with the SXTW form.
+        if insn & 0x1fe0_0000 == 0x0b20_0000 {
+            let is_64 = insn & 0x8000_0000 != 0;
+            let width = if is_64 { 64 } else { 32 };
+            let mask = low_mask(width);
+            let amount = (insn >> 10) & 7;
+            if amount > 4 {
+                return self.unsupported(pc, insn);
+            }
+            let option = (insn >> 13) & 7;
+            let source = self.x((insn >> 16) & 31);
+            let extended = match option {
+                0 => source as u8 as u64,
+                1 => source as u16 as u64,
+                2 => source as u32 as u64,
+                3 if is_64 => source,
+                4 => source as u8 as i8 as i64 as u64,
+                5 => source as u16 as i16 as i64 as u64,
+                6 => source as u32 as i32 as i64 as u64,
+                7 if is_64 => source as i64 as u64,
+                _ => return self.unsupported(pc, insn),
+            };
+            let right = extended.wrapping_shl(amount) & mask;
+            let left = self.x_or_sp((insn >> 5) & 31) & mask;
+            let subtract = insn & (1 << 30) != 0;
+            let set_flags = insn & (1 << 29) != 0;
+            let result = if subtract {
+                left.wrapping_sub(right)
+            } else {
+                left.wrapping_add(right)
+            } & mask;
+            if set_flags {
+                self.set(insn & 31, result);
+                let sign = width - 1;
+                let n = result >> sign != 0;
+                let z = result == 0;
+                let c = if subtract {
+                    left >= right
+                } else {
+                    u128::from(left) + u128::from(right) > u128::from(mask)
+                };
+                let v = if subtract {
+                    (((left ^ right) & (left ^ result)) >> sign) != 0
+                } else {
+                    ((!(left ^ right) & (left ^ result)) >> sign) != 0
+                };
+                self.nzcv = (n as u8) << 3 | (z as u8) << 2 | (c as u8) << 1 | v as u8;
+            } else {
+                self.set_x_or_sp(insn & 31, result);
+            }
+            self.pc = next;
+            return Ok(());
+        }
         // AND/ORR/EOR/ANDS immediate. Linux uses the TST alias here while
         // selecting its early exception-level and cache path.
         if insn & 0x1f80_0000 == 0x1200_0000 {
@@ -1083,6 +1137,17 @@ mod tests {
         cpu.set_x(4, 0x0123_4567_89ab_cdef);
         cpu.step().unwrap();
         assert_eq!(cpu.x(4), 0xefcd_ab89_6745_2301);
+    }
+
+    #[test]
+    fn add_extended_signs_a_32_bit_kernel_index() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x8b35_c275u32.to_le_bytes()).unwrap(); // ADD X21,X19,W21,SXTW
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.set_x(19, 100);
+        cpu.set_x(21, u32::MAX as u64);
+        cpu.step().unwrap();
+        assert_eq!(cpu.x(21), 99);
     }
 
     #[test]
