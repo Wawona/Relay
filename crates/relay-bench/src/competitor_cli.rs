@@ -49,7 +49,10 @@ pub fn run_named(kind: &str) -> ExitCode {
         "asbestos" => (asbestos(count), "nix-pinned asbestos-class CLI"),
         "unicorn" => (unicorn(count), "nix-pinned unicorn-class CLI"),
         "tcti" => (tcti(count), "nix-pinned TCTI-class CLI"),
-        "jit-utm" => (jit_proxy(count), "nix-pinned cross-class JIT proxy (not Mode A)"),
+        "jit-utm" => (
+            jit_proxy(count),
+            "nix-pinned cross-class JIT proxy (not Mode A)",
+        ),
         _ => {
             eprintln!("unknown competitor kind");
             return ExitCode::from(2);

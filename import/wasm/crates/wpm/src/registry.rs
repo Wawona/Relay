@@ -80,7 +80,11 @@ impl RegistryClient {
 
     pub fn install(&self, store: &PackageStore, name: &str, version: Option<&str>) -> Result<()> {
         let index = self.fetch_index()?;
-        let mut candidates: Vec<_> = index.packages.into_iter().filter(|p| p.name == name).collect();
+        let mut candidates: Vec<_> = index
+            .packages
+            .into_iter()
+            .filter(|p| p.name == name)
+            .collect();
         if candidates.is_empty() {
             bail!("package not found in registry: {name}");
         }

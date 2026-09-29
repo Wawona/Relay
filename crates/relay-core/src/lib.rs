@@ -73,9 +73,10 @@ impl RelayBackend {
 }
 
 /// Artifact class is which binary the user installed. Never an in-app toggle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactClass {
+    #[default]
     ModeA,
     ModeB,
 }
@@ -511,12 +512,6 @@ fn validate_artifact(name: &str, artifact: &GuestArtifact) -> Result<(), RelayEr
         )));
     }
     Ok(())
-}
-
-impl Default for ArtifactClass {
-    fn default() -> Self {
-        Self::ModeA
-    }
 }
 
 #[derive(Debug, Error)]

@@ -5,3 +5,7 @@
 /result-*
 /target
 relay-vm-state*
+/.wawona-verification.stamp
+/fuzz/artifacts
+/fuzz/corpus
+/fuzz/target

@@ -1,0 +1,23 @@
+[package]
+name = "relay-vm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.2"
+relay-core = { path = "../crates/relay-core" }
+relay-vm = { path = "../crates/relay-vm" }
+
+[[bin]]
+name = "page_translate"
+path = "fuzz_targets/page_translate.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

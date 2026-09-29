@@ -22,13 +22,13 @@ pub fn cli_run(args: &[String]) -> Result<i32> {
             if pkgs.is_empty() {
                 println!("(no packages installed)");
             } else {
-                println!("{:<24} {:<12} {:<8} {}", "NAME", "VERSION", "SOURCE", "DIGEST");
+                println!(
+                    "{:<24} {:<12} {:<8} {}",
+                    "NAME", "VERSION", "SOURCE", "DIGEST"
+                );
                 for p in pkgs {
                     let dig = p.digest.get(..19).unwrap_or(&p.digest);
-                    println!(
-                        "{:<24} {:<12} {:<8} {}…",
-                        p.name, p.version, p.source, dig
-                    );
+                    println!("{:<24} {:<12} {:<8} {}…", p.name, p.version, p.source, dig);
                 }
             }
             Ok(0)
@@ -47,22 +47,27 @@ pub fn cli_run(args: &[String]) -> Result<i32> {
             Ok(0)
         }
         "install" => {
-            let target = rest.get(1).context("usage: wpm install <name|./file.wasm>")?;
+            let target = rest
+                .get(1)
+                .context("usage: wpm install <name|./file.wasm>")?;
             let store = PackageStore::open_default()?;
             if target.contains('/') || target.ends_with(".wasm") || target.starts_with('.') {
                 let path = std::path::Path::new(target);
-                let name = rest.iter().position(|a| *a == "--name").and_then(|i| rest.get(i + 1));
+                let name = rest
+                    .iter()
+                    .position(|a| *a == "--name")
+                    .and_then(|i| rest.get(i + 1));
                 let ver = rest
                     .iter()
                     .position(|a| *a == "--version")
                     .and_then(|i| rest.get(i + 1))
                     .unwrap_or(&"0.0.0");
                 let pkg = store.install_local(path, name.copied(), ver)?;
+                println!("installed {} {} ({})", pkg.name, pkg.version, pkg.digest);
                 println!(
-                    "installed {} {} ({})",
-                    pkg.name, pkg.version, pkg.digest
+                    "run: wasm {}   or   wasm $(wpm path {})",
+                    pkg.name, pkg.name
                 );
-                println!("run: wasm {}   or   wasm $(wpm path {})", pkg.name, pkg.name);
                 Ok(0)
             } else {
                 #[cfg(feature = "registry")]

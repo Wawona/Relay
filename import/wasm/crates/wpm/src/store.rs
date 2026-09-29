@@ -320,7 +320,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = PackageStore::open(dir.path()).unwrap();
         let wasm = dir.path().join("hello.wasm");
-        File::create(&wasm).unwrap().write_all(&tiny_wasm()).unwrap();
+        File::create(&wasm)
+            .unwrap()
+            .write_all(&tiny_wasm())
+            .unwrap();
 
         let pkg = store.install_local(&wasm, Some("hello"), "0.1.0").unwrap();
         assert_eq!(pkg.name, "hello");

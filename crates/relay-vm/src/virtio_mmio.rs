@@ -276,6 +276,24 @@ fn set_high(target: &mut u64, value: u32) {
     *target = (*target & 0x0000_0000_ffff_ffff) | (u64::from(value) << 32);
 }
 
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{set_high, set_low};
+
+    #[kani::proof]
+    fn queue_address_halves_reconstruct_every_u64() {
+        let address: u64 = kani::any();
+        let initial: u64 = kani::any();
+        let mut reconstructed = initial;
+
+        set_low(&mut reconstructed, address as u32);
+        assert_eq!(reconstructed >> 32, initial >> 32);
+        set_high(&mut reconstructed, (address >> 32) as u32);
+
+        assert_eq!(reconstructed, address);
+    }
+}
+
 fn read_u16(memory: &GuestMemory, address: u64) -> Result<u16, RelayError> {
     let mut raw = [0; 2];
     memory.read(address, &mut raw)?;

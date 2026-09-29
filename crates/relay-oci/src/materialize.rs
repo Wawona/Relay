@@ -69,9 +69,8 @@ pub fn materialize_slim_bundle(destination: &Path) -> Result<RuntimeBundle, Rela
             RelayError::Failed(format!("cannot clear slim OCI bundle: {error}"))
         })?;
     }
-    fs::create_dir_all(destination.join("rootfs")).map_err(|error| {
-        RelayError::Failed(format!("cannot create slim OCI rootfs: {error}"))
-    })?;
+    fs::create_dir_all(destination.join("rootfs"))
+        .map_err(|error| RelayError::Failed(format!("cannot create slim OCI rootfs: {error}")))?;
     let process = json!({
         "terminal": false,
         "user": {"uid": 0, "gid": 0},
@@ -107,7 +106,14 @@ fn write_runtime_config(
         json!({"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]}),
     ];
     if slim_guest_binds {
-        for path in ["/bin", "/usr", "/lib", "/lib64", "/nix", "/run/current-system"] {
+        for path in [
+            "/bin",
+            "/usr",
+            "/lib",
+            "/lib64",
+            "/nix",
+            "/run/current-system",
+        ] {
             mounts.push(json!({
                 "destination": path,
                 "type": "bind",
@@ -167,8 +173,9 @@ fn runtime_process_from_config(
         #[serde(default)]
         config: Option<ProcessConfig>,
     }
-    let loose: LooseConfig = serde_json::from_slice(config_bytes)
-        .map_err(|error| RelayError::Failed(format!("invalid OCI image config process: {error}")))?;
+    let loose: LooseConfig = serde_json::from_slice(config_bytes).map_err(|error| {
+        RelayError::Failed(format!("invalid OCI image config process: {error}"))
+    })?;
     let cfg = loose.config.unwrap_or(ProcessConfig {
         entrypoint: None,
         cmd: None,
@@ -404,7 +411,11 @@ mod tests {
         });
         let config_bytes = serde_json::to_vec(&config).unwrap();
         let config_digest = format!("{:x}", Sha256::digest(&config_bytes));
-        fs::write(root.join("blobs/sha256").join(&config_digest), &config_bytes).unwrap();
+        fs::write(
+            root.join("blobs/sha256").join(&config_digest),
+            &config_bytes,
+        )
+        .unwrap();
 
         let manifest = json!({
             "schemaVersion": 2,

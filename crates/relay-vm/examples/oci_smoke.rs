@@ -43,7 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         handle.wayland_endpoint.as_deref().unwrap_or("")
     );
     let log = relay_vm::console_log(&handle.id)?;
-    if !log.windows(b"WAWONA_RELAY_READY=1".len()).any(|w| w == b"WAWONA_RELAY_READY=1") {
+    if !log
+        .windows(b"WAWONA_RELAY_READY=1".len())
+        .any(|w| w == b"WAWONA_RELAY_READY=1")
+    {
         return Err("OCI guest console missing WAWONA_RELAY_READY=1".into());
     }
     relay_vm::stop(&handle.id)?;

@@ -6,6 +6,14 @@
 
 use relay_core::{GuestPageSize, HostPageSize, RelayError};
 
+fn round_up_host_arena(guest_bytes: u64, host_bytes: u64) -> Option<u64> {
+    if !host_bytes.is_power_of_two() {
+        return None;
+    }
+    let mask = host_bytes - 1;
+    guest_bytes.checked_add(mask).map(|bytes| bytes & !mask)
+}
+
 /// Maps guest physical addresses into a host-backed arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageTranslate {
@@ -41,10 +49,8 @@ impl PageTranslate {
         // Contiguous GPA→offset identity. Host arena is the same span, rounded
         // up so mmap / Vec capacity respects host pages.
         let host = self.host.0 as u64;
-        let rounded = guest_bytes
-            .checked_add(host - 1)
-            .ok_or_else(|| RelayError::Failed("host arena size overflow".into()))?
-            & !(host - 1);
+        let rounded = round_up_host_arena(guest_bytes, host)
+            .ok_or_else(|| RelayError::Failed("host arena size overflow".into()))?;
         Ok(rounded)
     }
 
@@ -83,6 +89,28 @@ impl PageTranslate {
             self.guest.0 / 1024,
             self.host.0 / 1024
         )
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::round_up_host_arena;
+
+    #[kani::proof]
+    fn host_arena_rounding_covers_aligned_guest_ram() {
+        let guest_pages: u16 = kani::any();
+        let guest_is_16k: bool = kani::any();
+        let host_is_16k: bool = kani::any();
+        kani::assume(guest_pages != 0);
+        let guest_page = if guest_is_16k { 16_384u64 } else { 4_096 };
+        let host_page = if host_is_16k { 16_384u64 } else { 4_096 };
+        let guest_bytes = u64::from(guest_pages) * guest_page;
+
+        let arena = round_up_host_arena(guest_bytes, host_page).unwrap();
+
+        assert!(arena >= guest_bytes);
+        assert_eq!(arena % host_page, 0);
+        assert!(arena - guest_bytes < host_page);
     }
 }
 

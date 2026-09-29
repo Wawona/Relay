@@ -223,8 +223,7 @@ fn launch_guest(module: &Path) -> Result<Guest, RelayError> {
     }
     let binary = find_wasm_binary().ok_or_else(|| {
         RelayError::Planned(
-            "Relay wasm execute needs linked wawona_wasm_run or WAWONA_WASM / wasm on PATH"
-                .into(),
+            "Relay wasm execute needs linked wawona_wasm_run or WAWONA_WASM / wasm on PATH".into(),
         )
     })?;
     let child = Command::new(&binary)
@@ -296,9 +295,8 @@ fn validate_module_path(path: &Path) -> Result<PathBuf, RelayError> {
 }
 
 fn resolve_wpm_package(name: &str) -> Result<PathBuf, RelayError> {
-    let store = wpm::PackageStore::open_default().map_err(|error| {
-        RelayError::Failed(format!("cannot open wpm package store: {error}"))
-    })?;
+    let store = wpm::PackageStore::open_default()
+        .map_err(|error| RelayError::Failed(format!("cannot open wpm package store: {error}")))?;
     store.resolve_wasm(name).map_err(|error| {
         RelayError::Failed(format!(
             "WASM package `{name}` is not installed in wpm store: {error}"
@@ -331,8 +329,8 @@ fn next_id() -> u64 {
 mod tests {
     use super::*;
     use relay_core::{ArtifactClass, RelayPlatform};
-    use std::sync::{Mutex, OnceLock};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
     static STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -432,7 +430,8 @@ mod tests {
     #[test]
     fn start_rejects_missing_wpm_package_with_install_hint() {
         with_temp_store(|_| {
-            let err = start(&spec(RelayPlatform::Macos, Some("hello-wasi-gui".into()))).unwrap_err();
+            let err =
+                start(&spec(RelayPlatform::Macos, Some("hello-wasi-gui".into()))).unwrap_err();
             let RelayError::Failed(message) = err else {
                 panic!("expected Failed, got {err:?}");
             };
@@ -449,11 +448,7 @@ mod tests {
             store
                 .install_local(&wasm, Some("relay-fixture"), "0.0.1")
                 .unwrap();
-            let plan = prepare(&spec(
-                RelayPlatform::Macos,
-                Some("relay-fixture".into()),
-            ))
-            .unwrap();
+            let plan = prepare(&spec(RelayPlatform::Macos, Some("relay-fixture".into()))).unwrap();
             assert_eq!(plan.package.as_deref(), Some("relay-fixture"));
             let module = plan.module.expect("resolved module");
             assert!(module.is_file());

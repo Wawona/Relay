@@ -58,7 +58,9 @@ fn parse_spec(json: *const c_char) -> Result<RelaySpec, c_int> {
 }
 
 #[no_mangle]
-pub extern "C" fn relay_resolve_backend(
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI operation.
+pub unsafe extern "C" fn relay_resolve_backend(
     spec_json: *const c_char,
     backend_out: *mut *mut c_char,
 ) -> c_int {
@@ -76,7 +78,12 @@ pub extern "C" fn relay_resolve_backend(
 }
 
 #[no_mangle]
-pub extern "C" fn relay_start(spec_json: *const c_char, handle_out: *mut *mut c_char) -> c_int {
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI operation.
+pub unsafe extern "C" fn relay_start(
+    spec_json: *const c_char,
+    handle_out: *mut *mut c_char,
+) -> c_int {
     let mut spec = match parse_spec(spec_json) {
         Ok(s) => s,
         Err(c) => return c,
@@ -119,7 +126,9 @@ pub extern "C" fn relay_start(spec_json: *const c_char, handle_out: *mut *mut c_
 }
 
 #[no_mangle]
-pub extern "C" fn relay_stop(handle: *const c_char) -> c_int {
+/// # Safety
+/// `handle` must be null or point to a valid NUL-terminated string.
+pub unsafe extern "C" fn relay_stop(handle: *const c_char) -> c_int {
     let id = match cstr(handle) {
         Ok(s) => s,
         Err(c) => return c,
@@ -142,7 +151,9 @@ pub extern "C" fn relay_stop(handle: *const c_char) -> c_int {
 }
 
 #[no_mangle]
-pub extern "C" fn relay_wayland_endpoint(
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI operation.
+pub unsafe extern "C" fn relay_wayland_endpoint(
     handle: *const c_char,
     endpoint_out: *mut *mut c_char,
 ) -> c_int {
@@ -167,7 +178,12 @@ pub extern "C" fn relay_wayland_endpoint(
 }
 
 #[no_mangle]
-pub extern "C" fn relay_status(handle: *const c_char, status_out: *mut *mut c_char) -> c_int {
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI operation.
+pub unsafe extern "C" fn relay_status(
+    handle: *const c_char,
+    status_out: *mut *mut c_char,
+) -> c_int {
     let id = match cstr(handle) {
         Ok(s) => s,
         Err(c) => return c,
@@ -194,7 +210,9 @@ pub extern "C" fn relay_status(handle: *const c_char, status_out: *mut *mut c_ch
 }
 
 #[no_mangle]
-pub extern "C" fn relay_copy_log(
+/// # Safety
+/// Pointer arguments must be valid for their declared capacities.
+pub unsafe extern "C" fn relay_copy_log(
     handle: *const c_char,
     bytes: *mut u8,
     capacity: usize,
@@ -225,7 +243,9 @@ pub extern "C" fn relay_copy_log(
 }
 
 #[no_mangle]
-pub extern "C" fn relay_copy_frame(
+/// # Safety
+/// Pointer arguments must be valid for their declared capacities.
+pub unsafe extern "C" fn relay_copy_frame(
     handle: *const c_char,
     rgba: *mut u8,
     len: usize,
@@ -267,7 +287,9 @@ pub extern "C" fn relay_copy_frame(
 }
 
 #[no_mangle]
-pub extern "C" fn relay_probe_ios_hv(
+/// # Safety
+/// Pointer arguments must be valid for the documented C ABI operation.
+pub unsafe extern "C" fn relay_probe_ios_hv(
     spec_json: *const c_char,
     json_out: *mut *mut c_char,
 ) -> c_int {
@@ -285,7 +307,9 @@ pub extern "C" fn relay_probe_ios_hv(
 }
 
 #[no_mangle]
-pub extern "C" fn relay_string_free(s: *mut c_char) {
+/// # Safety
+/// `s` must be null or a pointer returned by this library exactly once.
+pub unsafe extern "C" fn relay_string_free(s: *mut c_char) {
     if s.is_null() {
         return;
     }
@@ -301,14 +325,14 @@ mod tests {
     fn call_start(json: &str) -> (c_int, String) {
         let json = CString::new(json).unwrap();
         let mut output = std::ptr::null_mut();
-        let code = relay_start(json.as_ptr(), &mut output);
+        let code = unsafe { relay_start(json.as_ptr(), &mut output) };
         let text = if output.is_null() {
             String::new()
         } else {
             let text = unsafe { CStr::from_ptr(output) }
                 .to_string_lossy()
                 .into_owned();
-            relay_string_free(output);
+            unsafe { relay_string_free(output) };
             text
         };
         (code, text)
@@ -340,20 +364,20 @@ mod tests {
         )
         .unwrap();
         let mut output = std::ptr::null_mut();
-        let code = relay_probe_ios_hv(json.as_ptr(), &mut output);
+        let code = unsafe { relay_probe_ios_hv(json.as_ptr(), &mut output) };
         assert_eq!(code, OK);
         let text = unsafe { CStr::from_ptr(output) }
             .to_string_lossy()
             .into_owned();
-        relay_string_free(output);
+        unsafe { relay_string_free(output) };
         assert!(text.contains("\"supported\":true"));
         let mut backend = std::ptr::null_mut();
-        let code = relay_resolve_backend(json.as_ptr(), &mut backend);
+        let code = unsafe { relay_resolve_backend(json.as_ptr(), &mut backend) };
         assert_eq!(code, OK);
         let name = unsafe { CStr::from_ptr(backend) }
             .to_string_lossy()
             .into_owned();
-        relay_string_free(backend);
+        unsafe { relay_string_free(backend) };
         assert_eq!(name, "ios-hv");
     }
 }

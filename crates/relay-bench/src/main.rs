@@ -82,11 +82,7 @@ fn main() -> ExitCode {
         if report.gate_pass { "PASS" } else { "FAIL" },
         consecutive,
         MARKETING_STREAK_N,
-        if marketing_eligible {
-            "eligible"
-        } else {
-            "no"
-        }
+        if marketing_eligible { "eligible" } else { "no" }
     );
     for sample in &report.samples {
         println!(
@@ -213,9 +209,7 @@ fn write_report(
             sample.name, sample.status, sample.ms_per_op, sample.note
         ));
     }
-    summary.push_str(
-        "\nMethodology: `docs/mode-a-bench.md`. Mode A gate ignores JIT UTM.\n",
-    );
+    summary.push_str("\nMethodology: `docs/mode-a-bench.md`. Mode A gate ignores JIT UTM.\n");
     fs::write(out.join("SUMMARY.md"), summary).map_err(|e| e.to_string())?;
     Ok(())
 }
