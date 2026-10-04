@@ -23,6 +23,7 @@ struct Queue {
     available_ring: u64,
     used_ring: u64,
     last_available: u16,
+    notified: bool,
 }
 
 pub(crate) struct Transport {
@@ -34,13 +35,14 @@ pub(crate) struct Transport {
     driver_feature_select: u32,
     queue_select: u32,
     queue_num_max: u16,
-    queue: Queue,
-    notified_queue: Option<u32>,
+    queues: Vec<Queue>,
     interrupt_status: u32,
+    notification_counts: Vec<u64>,
+    completion_counts: Vec<u64>,
 }
 
 impl Transport {
-    pub(crate) fn new(device_id: u32, features: u64, queue_num_max: u32) -> Self {
+    pub(crate) fn new(device_id: u32, features: u64, queue_num_max: u32, queue_count: u32) -> Self {
         Self {
             device_id,
             features,
@@ -50,9 +52,10 @@ impl Transport {
             driver_feature_select: 0,
             queue_select: 0,
             queue_num_max: queue_num_max.min(u16::MAX as u32) as u16,
-            queue: Queue::default(),
-            notified_queue: None,
+            queues: vec![Queue::default(); queue_count.max(1) as usize],
             interrupt_status: 0,
+            notification_counts: vec![0; queue_count.max(1) as usize],
+            completion_counts: vec![0; queue_count.max(1) as usize],
         }
     }
 
@@ -66,9 +69,11 @@ impl Transport {
                 (self.features >> (self.device_feature_select * 32)) as u32
             }
             0x010 => 0,
-            0x034 if self.queue_select == 0 => self.queue_num_max as u32,
+            0x034 if self.queue(self.queue_select).is_ok() => self.queue_num_max as u32,
             0x034 => 0,
-            0x044 if self.queue_select == 0 => u32::from(self.queue.ready),
+            0x044 if self.queue(self.queue_select).is_ok() => {
+                u32::from(self.queue(self.queue_select).unwrap().ready)
+            }
             0x044 => 0,
             0x060 => self.interrupt_status,
             0x070 => self.status,
@@ -91,14 +96,14 @@ impl Transport {
             0x020 => return Err(RelayError::Failed("virtio feature selector invalid".into())),
             0x024 => self.driver_feature_select = value,
             0x030 => self.queue_select = value,
-            0x038 if self.queue_select == 0 => {
+            0x038 if self.queue(self.queue_select).is_ok() => {
                 if value == 0 || value > self.queue_num_max as u32 || !value.is_power_of_two() {
                     return Err(RelayError::Failed("virtio queue size invalid".into()));
                 }
-                self.queue.size = value as u16;
+                self.queue_mut()?.size = value as u16;
             }
             0x038 => return Err(RelayError::Failed("virtio queue selector invalid".into())),
-            0x044 if self.queue_select == 0 => {
+            0x044 if self.queue(self.queue_select).is_ok() => {
                 if value > 1 {
                     return Err(RelayError::Failed(
                         "virtio queue-ready value invalid".into(),
@@ -107,25 +112,41 @@ impl Transport {
                 if value == 1 {
                     self.validate_queue_configuration()?;
                 }
-                self.queue.ready = value == 1;
+                self.queue_mut()?.ready = value == 1;
             }
             0x044 => return Err(RelayError::Failed("virtio queue selector invalid".into())),
             0x050 => {
-                if value != 0 || !self.queue.ready || self.status & STATUS_DRIVER_OK == 0 {
+                if self.queue(value).is_err()
+                    || !self.queue(value).unwrap().ready
+                    || self.status & STATUS_DRIVER_OK == 0
+                {
                     return Err(RelayError::Failed(
                         "virtio notification for unavailable queue".into(),
                     ));
                 }
-                self.notified_queue = Some(value);
+                self.notification_counts[value as usize] += 1;
+                self.queue_mut_at(value)?.notified = true;
             }
             0x064 => self.interrupt_status &= !value,
             0x070 => self.set_status(value)?,
-            0x080 if self.queue_select == 0 => set_low(&mut self.queue.descriptor_table, value),
-            0x084 if self.queue_select == 0 => set_high(&mut self.queue.descriptor_table, value),
-            0x090 if self.queue_select == 0 => set_low(&mut self.queue.available_ring, value),
-            0x094 if self.queue_select == 0 => set_high(&mut self.queue.available_ring, value),
-            0x0a0 if self.queue_select == 0 => set_low(&mut self.queue.used_ring, value),
-            0x0a4 if self.queue_select == 0 => set_high(&mut self.queue.used_ring, value),
+            0x080 if self.queue(self.queue_select).is_ok() => {
+                set_low(&mut self.queue_mut()?.descriptor_table, value)
+            }
+            0x084 if self.queue(self.queue_select).is_ok() => {
+                set_high(&mut self.queue_mut()?.descriptor_table, value)
+            }
+            0x090 if self.queue(self.queue_select).is_ok() => {
+                set_low(&mut self.queue_mut()?.available_ring, value)
+            }
+            0x094 if self.queue(self.queue_select).is_ok() => {
+                set_high(&mut self.queue_mut()?.available_ring, value)
+            }
+            0x0a0 if self.queue(self.queue_select).is_ok() => {
+                set_low(&mut self.queue_mut()?.used_ring, value)
+            }
+            0x0a4 if self.queue(self.queue_select).is_ok() => {
+                set_high(&mut self.queue_mut()?.used_ring, value)
+            }
             0x080 | 0x084 | 0x090 | 0x094 | 0x0a0 | 0x0a4 => {
                 return Err(RelayError::Failed("virtio queue selector invalid".into()))
             }
@@ -139,64 +160,86 @@ impl Transport {
     }
 
     pub(crate) fn take_notification(&mut self) -> Option<u32> {
-        self.notified_queue.take()
+        let index = self.pending_notification()?;
+        self.clear_notification(index);
+        Some(index)
     }
 
-    pub(crate) fn descriptor_table(&self) -> u64 {
-        self.queue.descriptor_table
+    pub(crate) fn pending_notification(&self) -> Option<u32> {
+        self.queues
+            .iter()
+            .position(|q| q.notified)
+            .map(|i| i as u32)
     }
 
-    pub(crate) fn queue_size(&self) -> u16 {
-        self.queue.size
+    pub(crate) fn queue_notified(&self, queue: u32) -> bool {
+        self.queues.get(queue as usize).is_some_and(|q| q.notified)
+    }
+
+    pub(crate) fn clear_notification(&mut self, queue: u32) {
+        if let Some(q) = self.queues.get_mut(queue as usize) {
+            q.notified = false;
+        }
+    }
+
+    pub(crate) fn descriptor_table(&self, queue: u32) -> Result<u64, RelayError> {
+        Ok(self.queue(queue)?.descriptor_table)
+    }
+
+    pub(crate) fn queue_size(&self, queue: u32) -> Result<u16, RelayError> {
+        Ok(self.queue(queue)?.size)
     }
 
     pub(crate) fn pop_available(
         &mut self,
+        queue: u32,
         memory: &GuestMemory,
     ) -> Result<Option<u16>, RelayError> {
-        self.require_operational()?;
-        let available_index = read_u16(memory, self.queue.available_ring + 2)?;
-        if available_index.wrapping_sub(self.queue.last_available) > self.queue.size {
+        self.require_operational(queue)?;
+        let q = self.queue(queue)?;
+        let available_index = read_u16(memory, q.available_ring + 2)?;
+        if available_index.wrapping_sub(q.last_available) > q.size {
             return Err(RelayError::Failed(
                 "virtio available ring advanced beyond queue size".into(),
             ));
         }
-        if self.queue.last_available == available_index {
+        if q.last_available == available_index {
             return Ok(None);
         }
-        let slot = self.queue.last_available % self.queue.size;
-        let head = read_u16(memory, self.queue.available_ring + 4 + u64::from(slot) * 2)?;
-        if head >= self.queue.size {
+        let slot = q.last_available % q.size;
+        let head = read_u16(memory, q.available_ring + 4 + u64::from(slot) * 2)?;
+        if head >= q.size {
             return Err(RelayError::Failed(
                 "virtio available head is outside descriptor table".into(),
             ));
         }
-        self.queue.last_available = self.queue.last_available.wrapping_add(1);
+        let q = self.queue_mut_at(queue)?;
+        q.last_available = q.last_available.wrapping_add(1);
         Ok(Some(head))
     }
 
     pub(crate) fn complete(
         &mut self,
+        queue: u32,
         memory: &mut GuestMemory,
         head: u16,
         bytes_written: u32,
     ) -> Result<(), RelayError> {
-        self.require_operational()?;
-        if head >= self.queue.size {
+        self.require_operational(queue)?;
+        let q = self.queue(queue)?;
+        if head >= q.size {
             return Err(RelayError::Failed(
                 "virtio used head is outside descriptor table".into(),
             ));
         }
-        let used_index = read_u16(memory, self.queue.used_ring + 2)?;
-        let slot = used_index % self.queue.size;
-        let element = self.queue.used_ring + 4 + u64::from(slot) * 8;
+        let used_index = read_u16(memory, q.used_ring + 2)?;
+        let slot = used_index % q.size;
+        let element = q.used_ring + 4 + u64::from(slot) * 8;
         memory.write(element, &u32::from(head).to_le_bytes())?;
         memory.write(element + 4, &bytes_written.to_le_bytes())?;
-        memory.write(
-            self.queue.used_ring + 2,
-            &used_index.wrapping_add(1).to_le_bytes(),
-        )?;
+        memory.write(q.used_ring + 2, &used_index.wrapping_add(1).to_le_bytes())?;
         self.interrupt_status |= INTERRUPT_USED_BUFFER;
+        self.completion_counts[queue as usize] += 1;
         Ok(())
     }
 
@@ -204,9 +247,10 @@ impl Transport {
         if value == 0 {
             self.status = 0;
             self.driver_features = 0;
-            self.queue = Queue::default();
-            self.notified_queue = None;
+            self.queues.fill(Queue::default());
             self.interrupt_status = 0;
+            self.notification_counts.fill(0);
+            self.completion_counts.fill(0);
             return Ok(());
         }
         if value
@@ -238,8 +282,7 @@ impl Transport {
                     "virtio driver-ready sequence invalid".into(),
                 ));
             }
-            self.validate_queue_configuration()?;
-            if !self.queue.ready {
+            if !self.queues.iter().any(|queue| queue.ready) {
                 return Err(RelayError::Failed(
                     "virtio driver-ready without queue".into(),
                 ));
@@ -250,21 +293,46 @@ impl Transport {
     }
 
     fn validate_queue_configuration(&self) -> Result<(), RelayError> {
-        if self.queue.size == 0
-            || self.queue.descriptor_table % 16 != 0
-            || self.queue.available_ring % 2 != 0
-            || self.queue.used_ring % 4 != 0
+        let queue = self.queue(self.queue_select)?;
+        if queue.size == 0
+            || queue.descriptor_table % 16 != 0
+            || queue.available_ring % 2 != 0
+            || queue.used_ring % 4 != 0
         {
             return Err(RelayError::Failed("virtio queue layout invalid".into()));
         }
         Ok(())
     }
 
-    fn require_operational(&self) -> Result<(), RelayError> {
-        if !self.queue.ready || self.status & STATUS_DRIVER_OK == 0 {
+    fn require_operational(&self, index: u32) -> Result<(), RelayError> {
+        if !self.queue(index)?.ready || self.status & STATUS_DRIVER_OK == 0 {
             return Err(RelayError::Failed("virtio queue is not operational".into()));
         }
         Ok(())
+    }
+
+    fn queue(&self, index: u32) -> Result<&Queue, RelayError> {
+        self.queues
+            .get(index as usize)
+            .ok_or_else(|| RelayError::Failed("virtio queue selector invalid".into()))
+    }
+
+    fn queue_mut_at(&mut self, index: u32) -> Result<&mut Queue, RelayError> {
+        self.queues
+            .get_mut(index as usize)
+            .ok_or_else(|| RelayError::Failed("virtio queue selector invalid".into()))
+    }
+
+    fn queue_mut(&mut self) -> Result<&mut Queue, RelayError> {
+        self.queue_mut_at(self.queue_select)
+    }
+
+    pub(crate) fn queue_activity(&self, queue: u32) -> (u64, u64) {
+        let index = queue as usize;
+        (
+            self.notification_counts.get(index).copied().unwrap_or(0),
+            self.completion_counts.get(index).copied().unwrap_or(0),
+        )
     }
 }
 
@@ -306,7 +374,7 @@ mod tests {
     use relay_core::GuestPageSize;
 
     fn configured_transport() -> Transport {
-        let mut transport = Transport::new(2, 1 << 32, 128);
+        let mut transport = Transport::new(2, 1 << 32, 128, 1);
         transport.write(0x014, 1).unwrap();
         assert_eq!(transport.read(0x010).unwrap(), 1);
         transport.write(0x024, 1).unwrap();
@@ -349,9 +417,9 @@ mod tests {
         memory.write(0x202, &1u16.to_le_bytes()).unwrap();
         memory.write(0x204, &3u16.to_le_bytes()).unwrap();
         let mut transport = configured_transport();
-        assert_eq!(transport.pop_available(&memory).unwrap(), Some(3));
-        assert_eq!(transport.pop_available(&memory).unwrap(), None);
-        transport.complete(&mut memory, 3, 512).unwrap();
+        assert_eq!(transport.pop_available(0, &memory).unwrap(), Some(3));
+        assert_eq!(transport.pop_available(0, &memory).unwrap(), None);
+        transport.complete(0, &mut memory, 3, 512).unwrap();
         let mut used = [0; 10];
         memory.read(0x302, &mut used).unwrap();
         assert_eq!(u16::from_le_bytes(used[..2].try_into().unwrap()), 1);
@@ -364,7 +432,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_feature_and_status_sequences() {
-        let mut transport = Transport::new(2, 0, 8);
+        let mut transport = Transport::new(2, 0, 8, 1);
         transport.write(0x024, 1).unwrap();
         transport.write(0x020, 1).unwrap();
         assert!(transport

@@ -10,7 +10,7 @@ on:
       - "Cargo.toml"
       - "deny.toml"
       - "verification/**"
-      - "scripts/verify-*.sh"
+      - "scripts/*.sh"
       - ".github/workflows/formal-verification.yml"
   push:
     branches: [development]
@@ -22,7 +22,7 @@ on:
       - "Cargo.toml"
       - "deny.toml"
       - "verification/**"
-      - "scripts/verify-*.sh"
+      - "scripts/*.sh"
       - ".github/workflows/formal-verification.yml"
 
 permissions:
@@ -78,14 +78,35 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
 
-  miri:
+  native-arm64:
     needs: [kani, verus]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install nightly --profile minimal --component miri
+      - name: Require native ARM64 reference execution
+        run: |
+          test "$(uname -m)" = aarch64
+          rustc -vV
+      - name: Record successful proof dependency for this revision
+        run: scripts/formal-source-digest.sh > .wawona-verification.stamp
+      - name: Require and execute the native instruction corpus
+        run: |
+          cargo test -p relay-vm --locked cpu::native_reference -- --list > native-tests.txt
+          grep -Fx 'cpu::native_reference::lane_moves_match_native_for_all_valid_widths_and_lanes: test' native-tests.txt
+          cargo test -p relay-vm --locked cpu::native_reference
+
+  miri:
+    needs: [kani, verus]
+    runs-on: ubuntu-24.04
+    env:
+      MIRI_TOOLCHAIN: nightly-2026-09-29
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$MIRI_TOOLCHAIN" --profile minimal --component miri
       - name: Record successful proof dependency for this revision
         run: scripts/formal-source-digest.sh > .wawona-verification.stamp
       - run: scripts/verify-miri.sh

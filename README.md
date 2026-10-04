@@ -16,7 +16,7 @@ Flake input name: **`wwn-relay`** (`github:Wawona/Relay/development`).
 |------|----|-----------|------|
 | macOS Apple silicon | `Virtualization.framework` | Apple Containerization (OCI on VZ Linux VMs) | Wasmtime Cranelift |
 | Linux AppImage | KVM via cloud-hypervisor or crosvm. Fail closed without `/dev/kvm` | OCI-in-that-KVM-VM | Cranelift |
-| iOS / iPadOS Mode A | Relay static CPU (jitless AArch64) | OCI on that VM | Pulley / static |
+| iOS / iPadOS Mode A | Relay static CPU (jitless AArch64) | OCI on that VM | Pulley through OS 26. OS 27+: Wasmer WASIX in a hidden WKWebView when WasmerSDK is linked |
 | iOS / iPadOS Mode B (tipa / Sileo) | Same CPU plus JIT when MAP_JIT write+exec works | OCI on that VM | Same bytecode. Pulley until MAP_JIT |
 | Android Play / sideload Mode A | Relay static CPU. No AVF | OCI-in-VM (virtiofs `oci-bundle` + guest crun). No proot | Pulley |
 | Android root Mode B | AVF if granted, else KVM, else Mode A CPU | OCI-in-that-VM | Cranelift |
@@ -51,6 +51,11 @@ launcher.
   scaffolding, timer state, and a Virtio 1.0 MMIO split queue. Linux boot is
   still planned. `PageTranslate` maps 4 KiB or 16 KiB guests onto the host
   process page size without a second VM product.
+- Static CPU differential diagnosis records chained architectural checkpoints
+  with registers, exception state, and dirty-page hashes. The comparator finds
+  the first divergent checkpoint against an external AArch64 reference trace.
+  See [`docs/static-cpu-differential.md`](docs/static-cpu-differential.md) and
+  the explicit [acceptance gates](docs/static-cpu-acceptance.md).
 - Mode A benches: `nix run .#relay-mode-a-bench` (see live charts above).
 - macOS VZ: the native `wawona-vz-run` launcher boots the generated Linux 7.2
   NixOS bundle through stage 1 and stage 2 to the automatic `wawona` login, and

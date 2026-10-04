@@ -10,6 +10,7 @@ const END: u32 = 9;
 const GIC_PHANDLE: u32 = 1;
 
 pub fn build(
+    memory_base: u64,
     memory_bytes: u64,
     bootargs: &str,
     initrd: Option<(u64, u64)>,
@@ -37,20 +38,28 @@ pub fn build(
     end_node(&mut st);
     end_node(&mut st);
 
-    node(&mut st, "memory@0");
+    node(&mut st, &format!("memory@{memory_base:x}"));
     prop_str(&mut st, &mut strings, "device_type", "memory");
     prop_cells(
         &mut st,
         &mut strings,
         "reg",
-        &[0, 0, (memory_bytes >> 32) as u32, memory_bytes as u32],
+        &[
+            (memory_base >> 32) as u32,
+            memory_base as u32,
+            (memory_bytes >> 32) as u32,
+            memory_bytes as u32,
+        ],
     );
     end_node(&mut st);
 
     node(&mut st, "chosen");
     prop_str(&mut st, &mut strings, "bootargs", bootargs);
     if let Some((start, end)) = initrd {
-        if start >= end || end > memory_bytes {
+        let memory_end = memory_base
+            .checked_add(memory_bytes)
+            .ok_or_else(|| RelayError::Failed("DTB memory range overflow".into()))?;
+        if start < memory_base || start >= end || end > memory_end {
             return Err(RelayError::Failed("DTB initrd range is invalid".into()));
         }
         prop_u64(&mut st, &mut strings, "linux,initrd-start", start);
@@ -64,7 +73,10 @@ pub fn build(
     end_node(&mut st);
 
     node(&mut st, "intc@8000000");
-    prop_str(&mut st, &mut strings, "compatible", "arm,gic-v3");
+    // Relay implements the GICv2 distributor and CPU-interface MMIO model.
+    // Advertising v3 would make Linux probe redistributors Relay does not
+    // expose, leaving early interrupt setup waiting forever.
+    prop_str(&mut st, &mut strings, "compatible", "arm,cortex-a15-gic");
     prop_u32(&mut st, &mut strings, "#interrupt-cells", 3);
     prop_empty(&mut st, &mut strings, "interrupt-controller");
     prop_u32(&mut st, &mut strings, "phandle", GIC_PHANDLE);
@@ -109,6 +121,20 @@ pub fn build(
     prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
     prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_0000, 0, 0x1000]);
     prop_cells(&mut st, &mut strings, "interrupts", &[0, 32, 4]);
+    end_node(&mut st);
+
+    // Port zero is the guest's hvc0. Relay forwards its output to the host
+    // wwn-igetty VirtualMachine session, never to a fabricated terminal.
+    node(&mut st, "virtio_mmio@a001000");
+    prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
+    prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_1000, 0, 0x1000]);
+    prop_cells(&mut st, &mut strings, "interrupts", &[0, 34, 4]);
+    end_node(&mut st);
+
+    node(&mut st, "virtio_mmio@a002000");
+    prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
+    prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_2000, 0, 0x1000]);
+    prop_cells(&mut st, &mut strings, "interrupts", &[0, 36, 4]);
     end_node(&mut st);
 
     end_node(&mut st);
@@ -195,7 +221,13 @@ mod tests {
 
     #[test]
     fn dtb_has_linux_boot_cpu_interrupt_and_virtio_nodes() {
-        let dtb = build(0x20_0000, "console=hvc0", Some((0x10_0000, 0x18_0000))).unwrap();
+        let dtb = build(
+            0x4000_0000,
+            0x20_0000,
+            "console=hvc0",
+            Some((0x4010_0000, 0x4018_0000)),
+        )
+        .unwrap();
         assert_eq!(&dtb[..4], &FDT_MAGIC.to_be_bytes());
         assert_eq!(
             u32::from_be_bytes(dtb[4..8].try_into().unwrap()) as usize,
@@ -204,7 +236,7 @@ mod tests {
         for expected in [
             b"console=hvc0".as_slice(),
             b"arm,arm-v8",
-            b"arm,gic-v3",
+            b"arm,cortex-a15-gic",
             b"arm,armv8-timer",
             b"arm,pl011",
             b"virtio,mmio",
@@ -216,6 +248,6 @@ mod tests {
 
     #[test]
     fn dtb_rejects_initrd_outside_guest_memory() {
-        assert!(build(0x20_0000, "", Some((0x10_0000, 0x30_0000))).is_err());
+        assert!(build(0x4000_0000, 0x20_0000, "", Some((0x4010_0000, 0x4030_0000))).is_err());
     }
 }

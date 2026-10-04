@@ -22,6 +22,13 @@ let
     populateImageCommands = ''
       mkdir -p ./files
       mkdir -p ./files/{proc,sys,dev,run,tmp,var,root,etc,bin}
+      # Direct boot must follow the generation selected on this disk, not
+      # the toplevel bundled by a later host-app update. Seed a normal Nix
+      # system profile so guest rebuilds can advance it and retain rollback.
+      mkdir -p ./files/nix/var/nix/profiles
+      ln -s ${toplevel} ./files/nix/var/nix/profiles/system-1-link
+      ln -s system-1-link ./files/nix/var/nix/profiles/system
+      ln -s /nix/var/nix/profiles/system/init ./files/init
     '';
   };
   rootfs = rawRootfs.overrideAttrs (old: {
@@ -61,7 +68,19 @@ let
       fi
     '';
   });
-  commandLine = "init=${toplevel}/init console=hvc0 root=/dev/vda rw loglevel=4";
+  # Direct Image boot does not pass through a NixOS bootloader. Reuse the
+  # guest module's kernel parameters so early console and diagnostic policy
+  # cannot silently drift from the command line embedded in manifest.json.
+  commandLine = pkgs.lib.concatStringsSep " " (
+    [ "init=/init" ]
+    ++ cfg.boot.kernelParams
+    ++ [
+      "root=/dev/vda"
+      "rootfstype=ext4"
+      "rootwait"
+      "rw"
+    ]
+  );
   expectedPageConfig =
     if pageSize == 4096 then "CONFIG_ARM64_4K_PAGES=y" else "CONFIG_ARM64_16K_PAGES=y";
 in
@@ -100,14 +119,14 @@ pkgs.runCommand "wawona-mobile-guest-artifacts"
       ls ${kernel} >&2
       exit 1
     fi
-    cp ${initrd}/initrd $out/initrd
     cp ${rootfs} $out/rootfs.img
-    printf '%s\n' '${commandLine}' > $out/cmdline
-
-    if zstd -dc $out/initrd | cpio --quiet -it | grep -q '~nix~case~hack~'; then
-      echo "Nix case-hack path leaked into Relay initrd" >&2
+    cp ${initrd}/initrd $out/initrd
+    cpio -it < $out/initrd > initrd-entries
+    if grep -q '~nix~case~hack~[0-9]' initrd-entries; then
+      echo "Relay initrd contains case-colliding Nix paths" >&2
       exit 1
     fi
+    printf '%s\n' '${commandLine}' > $out/cmdline
 
     jq -n \
       --arg kernelPath "Image" \

@@ -638,10 +638,15 @@ mod tests {
             machine_id: None,
             image: Some("proot:alpine".into()),
             memory_mb: None,
+            disk_gib: None,
+            max_disk_gib: None,
             guest_page_size: None,
             guest: None,
             resources: None,
             ios_hv_host: None,
+            nixos_generation: None,
+            apple_os_major: None,
+            wasmer_webkit_linked: false,
         };
         assert!(matches!(
             prepare_bundle(&spec),
@@ -662,6 +667,8 @@ mod tests {
             machine_id: Some("slim".into()),
             image: None,
             memory_mb: None,
+            disk_gib: None,
+            max_disk_gib: None,
             guest_page_size: None,
             guest: None,
             resources: Some(relay_core::RelayRuntimeResources {
@@ -672,6 +679,9 @@ mod tests {
                 allow_unsigned_guest: true,
             }),
             ios_hv_host: None,
+            nixos_generation: None,
+            apple_os_major: None,
+            wasmer_webkit_linked: false,
         };
         let path = prepare_bundle(&spec).unwrap().unwrap();
         assert!(Path::new(&path).join("config.json").is_file());

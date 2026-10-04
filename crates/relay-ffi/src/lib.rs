@@ -1,10 +1,10 @@
 //! C ABI. Keep `wawona_wasm_*` / `wwn_vm_*` in their own archives for overlap.
 
-use relay_core::{resolve_backend, RelayKind, RelaySpec};
+use relay_core::{resolve_backend, RelayBackend, RelayKind, RelaySpec};
 use relay_oci::prepare_bundle;
 use relay_vm::{
-    console_log as vm_console_log, start as vm_start, status as vm_status, stop as vm_stop,
-    RelayHandle, RelayVmStatus,
+    console_log as vm_console_log, generations_json as vm_generations_json, start as vm_start,
+    status as vm_status, stop as vm_stop, RelayHandle, RelayVmStatus,
 };
 use std::collections::HashSet;
 use std::ffi::{CStr, CString};
@@ -52,6 +52,44 @@ fn map_err(e: relay_core::RelayError) -> c_int {
     }
 }
 
+fn wasmer_webkit_start(module: &str, handle_out: *mut *mut c_char) -> c_int {
+    #[cfg(unix)]
+    {
+        use std::os::raw::c_void;
+        unsafe extern "C" {
+            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        }
+        #[cfg(target_os = "macos")]
+        const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+        #[cfg(not(target_os = "macos"))]
+        const RTLD_DEFAULT: *mut c_void = std::ptr::null_mut();
+        type StartFn = unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> c_int;
+        let symbol = match CString::new("wwn_wasmer_webkit_start") {
+            Ok(s) => s,
+            Err(_) => return ERR_ARG,
+        };
+        let ptr = unsafe { dlsym(RTLD_DEFAULT, symbol.as_ptr()) };
+        if ptr.is_null() {
+            let _ = give(
+                handle_out,
+                "Wasmer WASIX WebKit host is not linked; iOS 13-26 stays on Pulley",
+            );
+            return ERR_PLANNED;
+        }
+        let start: StartFn = unsafe { std::mem::transmute(ptr) };
+        let module = match CString::new(module) {
+            Ok(s) => s,
+            Err(_) => return ERR_ARG,
+        };
+        return unsafe { start(module.as_ptr(), handle_out) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (module, handle_out);
+        ERR_PLANNED
+    }
+}
+
 fn parse_spec(json: *const c_char) -> Result<RelaySpec, c_int> {
     let s = cstr(json)?;
     serde_json::from_str(s).map_err(|_| ERR_ARG)
@@ -89,6 +127,9 @@ pub unsafe extern "C" fn relay_start(
         Err(c) => return c,
     };
     if spec.kind == RelayKind::Wasm {
+        if matches!(resolve_backend(&spec), Ok(RelayBackend::WasmWasmerWebKit)) {
+            return wasmer_webkit_start(spec.image.as_deref().unwrap_or(""), handle_out);
+        }
         match relay_wasm::start(&spec) {
             Ok(handle) => {
                 if let Ok(mut g) = wasm_handles().lock() {
@@ -141,12 +182,37 @@ pub unsafe extern "C" fn relay_stop(handle: *const c_char) -> c_int {
             };
         }
     }
-    if let Ok(mut g) = HANDLES.lock() {
-        g.retain(|h| h.id != id);
-    }
     match vm_stop(id) {
-        Ok(()) => OK,
+        Ok(()) => {
+            if let Ok(mut g) = HANDLES.lock() {
+                g.retain(|h| h.id != id);
+            }
+            OK
+        }
         Err(e) => map_err(e),
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// Handle must be a valid NUL-terminated string. Entry must remain callable
+/// until stop succeeds, retain no borrowed descriptor, and return on channel
+/// closure. Entry may duplicate its descriptor for the synchronous call.
+pub unsafe extern "C" fn relay_start_host_waypipe(
+    handle: *const c_char,
+    entry: Option<relay_vm::HostWaypipeEntry>,
+) -> c_int {
+    let id = match cstr(handle) {
+        Ok(id) => id,
+        Err(error) => return error,
+    };
+    let Some(entry) = entry else {
+        return ERR_ARG;
+    };
+    // SAFETY: C ABI caller supplies the contracted native entry.
+    match unsafe { relay_vm::start_host_waypipe(id, entry) } {
+        Ok(()) => OK,
+        Err(error) => map_err(error),
     }
 }
 
@@ -379,5 +445,61 @@ mod tests {
             .into_owned();
         unsafe { relay_string_free(backend) };
         assert_eq!(name, "ios-hv");
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// `name` and optional `source` are NUL-terminated UTF-8. `json_out` must be
+/// writable; free the returned string with `relay_string_free`.
+pub unsafe extern "C" fn relay_nix_editor(
+    name: *const c_char,
+    source: *const c_char,
+    json_out: *mut *mut c_char,
+) -> c_int {
+    let name = match cstr(name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let default = match relay_core::nix_editor::default_file(name) {
+        Some(s) => s,
+        None => return ERR_ARG,
+    };
+    let source = if source.is_null() {
+        default
+    } else {
+        match cstr(source) {
+            Ok(s) => s,
+            Err(e) => return e,
+        }
+    };
+    if source.len() > 1024 * 1024 {
+        return ERR_ARG;
+    }
+    let document = serde_json::json!({ "source": source, "highlights": relay_core::nix_editor::highlights(source) });
+    give(json_out, &document.to_string())
+}
+
+#[no_mangle]
+/// # Safety
+/// `disk_path` must be null or a valid NUL-terminated path. `json_out` must
+/// be a valid pointer to a string slot.
+pub unsafe extern "C" fn relay_nixos_generations(
+    disk_path: *const c_char,
+    json_out: *mut *mut c_char,
+) -> c_int {
+    let path = match cstr(disk_path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if path.len() > 4096 || path.contains('\0') {
+        return ERR_ARG;
+    }
+    match vm_generations_json(std::path::Path::new(path)) {
+        Ok(json) => give(json_out, &json),
+        Err(e) => {
+            let _ = give(json_out, &e.to_string());
+            map_err(e)
+        }
     }
 }

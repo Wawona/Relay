@@ -25,6 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         machine_id: Some("oci-smoke".into()),
         image: Some(bundle.root.display().to_string()),
         memory_mb: Some((manifest.memory_bytes / (1024 * 1024)) as u32),
+        disk_gib: None,
+        max_disk_gib: None,
         guest_page_size: Some(manifest.page_size),
         guest: Some(manifest),
         resources: Some(RelayRuntimeResources {
@@ -35,6 +37,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             allow_unsigned_guest: true,
         }),
         ios_hv_host: None,
+        nixos_generation: None,
+        apple_os_major: None,
+        wasmer_webkit_linked: false,
     };
     let handle = relay_vm::start(&spec)?;
     println!(

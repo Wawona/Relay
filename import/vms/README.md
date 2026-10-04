@@ -12,7 +12,8 @@ Guest GUI is vsock + waypipe into Wawona (iland). Not RDP. Not Spice.
 | **macOS** | Virtualization.framework via Relay |
 | **iOS / iPadOS Mode A** | Relay static CPU. Planned. Fail closed. No QEMU |
 | **iOS / iPadOS Mode B** | That CPU plus Relay JIT CPU. Planned. Fail closed. No QEMU |
-| **visionOS / tvOS / watchOS** | VM machine kind forbidden |
+| **visionOS Mode A / B** | Relay static CPU. Planned. No QEMU |
+| **tvOS / watchOS** | VM machine kind forbidden |
 | **Android Play** | Relay static CPU. Planned. No AVF. No QEMU |
 | **Linux** | KVM via cloud-hypervisor or crosvm. Fail closed without `/dev/kvm` |
 

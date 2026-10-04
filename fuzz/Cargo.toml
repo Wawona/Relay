@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.2"
 relay-core = { path = "../crates/relay-core" }
-relay-vm = { path = "../crates/relay-vm" }
+relay-vm = { path = "../crates/relay-vm", features = ["fuzzing"] }
 
 [[bin]]
 name = "page_translate"
@@ -21,3 +21,10 @@ bench = false
 
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "vsock_packets"
+path = "fuzz_targets/vsock_packets.rs"
+test = false
+doc = false
+bench = false

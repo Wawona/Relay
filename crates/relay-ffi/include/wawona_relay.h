@@ -31,6 +31,13 @@ int relay_start(const char *spec_json, char **handle_out);
 
 int relay_stop(const char *handle);
 
+/* Native synchronous waypipe entry: fd is borrowed for this call. Duplicate it
+ * if needed, never close the caller's fd, and return when its peer closes.
+ * Entry stays callable until relay_stop succeeds. Transport only, no readiness.
+ * A failed/pending stop retains the handle; caller must retry. */
+typedef int (*relay_host_waypipe_entry)(int fd);
+int relay_start_host_waypipe(const char *handle, relay_host_waypipe_entry entry);
+
 int relay_wayland_endpoint(const char *handle, char **endpoint_out);
 
 int relay_status(const char *handle, char **status_out);
@@ -42,6 +49,13 @@ int relay_copy_log(const char *handle, uint8_t *bytes, size_t capacity,
 /* Latest guest SHM frame. rgba may be NULL to query width/height only. */
 int relay_copy_frame(const char *handle, uint8_t *rgba, size_t len,
                      uint32_t *width, uint32_t *height);
+
+/* Native Nix editor data. NULL source requests the default file. */
+int relay_nix_editor(const char *name, const char *source, char **json_out);
+
+/* NixOS generations on a stopped machine disk. Missing file returns
+ * {"present":false,"generations":[]}. Does not modify the disk. */
+int relay_nixos_generations(const char *disk_path, char **json_out);
 
 void relay_string_free(char *s);
 

@@ -16,9 +16,10 @@ as `virtual_machine` (`relay-vm`). Guest GUI is Wayland into Wawona
 |----------|---------------|---------------------|
 | **macOS** | Apple Containerization via Relay (OCI on VZ) | Same plus desktop-host paths |
 | **iOS / iPadOS** | Relay static / jitless CPU. Tipa proof: OCI tint on same SHM frame | Same Relay plus Mode B JIT CPU when MAP_JIT write+exec works |
+| **visionOS** | Relay static / jitless CPU. Planned | Same static CPU. No iOS Hypervisor.framework path |
 | **Android** | Relay static CPU. Planned. Fail closed | Root / privileged Relay. Planned |
 | **Linux** | Same KVM VM backend as `virtual_machine` | N/A |
-| **tvOS / watchOS / visionOS** | Forbidden | Forbidden |
+| **tvOS / watchOS** | Forbidden | Forbidden |
 
 Mode A vs Mode B is which binary was installed, not a Settings toggle.
 
@@ -28,7 +29,7 @@ Mode A vs Mode B is which binary was installed, not a Settings toggle.
 - `relay-oci` prepare (userspace unpack). Never proot, never host Docker
 - Slim NixOS / proof rootfs. Embed in the iOS tipa only after Relay frames
 - vsock + waypipe into Wawona iland. IOMFB on TrollStore Mode B
-- Capability gates. tvOS / watchOS / visionOS stay forbidden
+- Capability gates. tvOS / watchOS stay forbidden; visionOS follows Apple-mobile StaticCpu
 
 ## Relation to Wasm packages
 
@@ -41,5 +42,5 @@ JIT-execute the same `/wasm/v1` bytecode later; there is no Mode B wasm catalog.
 - QEMU, TCTI, UTM, Spice, virgl, or `wwn-qemu-run`
 - proot or host Docker as a product container backend
 - Mode B engine inside an App Store IPA behind a toggle
-- Container machine kind on tvOS / watchOS / visionOS
+- Container machine kind on tvOS / watchOS
 - Document container frames as done before Relay presents on that artifact

@@ -75,7 +75,7 @@
           ios = vmsDir + "/mobile/guest.nix";
           ipados = vmsDir + "/mobile/guest.nix";
           tvos = vmsDir + "/stub.nix";
-          visionos = vmsDir + "/stub.nix";
+          visionos = vmsDir + "/mobile/guest.nix";
           watchos = vmsDir + "/stub.nix";
           android = vmsDir + "/mobile/guest.nix";
           wearos = vmsDir + "/stub.nix";
@@ -86,7 +86,7 @@
           ios = failClosed;
           ipados = failClosed;
           tvos = vmsDir + "/stub.nix";
-          visionos = vmsDir + "/stub.nix";
+          visionos = failClosed;
           watchos = vmsDir + "/stub.nix";
           android = failClosed;
           wearos = vmsDir + "/stub.nix";
@@ -155,6 +155,13 @@
         };
       };
 
+      nixosModules.default = import ./import/vms/dependencies/vms/mobile/relay.nix;
+      nixosModules.relay = self.nixosModules.default;
+      templates.nixos-guest = {
+        path = ./crates/relay-core/templates/nixos-guest;
+        description = "Editable NixOS guest flake with Wawona Relay integration";
+      };
+
       packages = forAll (
         system:
         let
@@ -211,6 +218,8 @@
               wawona-wasm-watchos-sim = tc.buildForWatchOS "wawona-wasm" { simulator = true; };
               wawona-relay-ios = tc.buildForIOS "wawona-relay" { };
               wawona-relay-ios-sim = tc.buildForIOS "wawona-relay" { simulator = true; };
+              wawona-relay-visionos = tc.buildForVisionOS "wawona-relay" { };
+              wawona-relay-visionos-sim = tc.buildForVisionOS "wawona-relay" { simulator = true; };
               wawona-relay-watchos = tc.buildForWatchOS "wawona-relay" { };
               wawona-relay-watchos-sim = tc.buildForWatchOS "wawona-relay" { simulator = true; };
             }

@@ -15,9 +15,10 @@ is Wayland into Wawona (`wawona-guest-wayland-iland`).
 |----------|---------------|---------------------|
 | **macOS** | Virtualization.framework via Relay | Same plus desktop-host paths |
 | **iOS / iPadOS** | Relay static / jitless CPU. Tipa proof presents a Relay SHM frame on IOMFB | Same Relay plus Mode B JIT CPU when MAP_JIT write+exec works. TXM EPERM = JIT ARMED + static CPU |
+| **visionOS** | Relay static / jitless CPU. Planned | Same static CPU. No iOS Hypervisor.framework path |
 | **Android** | Relay static CPU. Planned. Fail closed | Root / privileged Relay. Planned |
 | **Linux** | KVM via cloud-hypervisor or crosvm. Fail closed without `/dev/kvm` | N/A |
-| **tvOS / watchOS / visionOS** | Forbidden | Forbidden |
+| **tvOS / watchOS** | Forbidden | Forbidden |
 
 Mode A vs Mode B is which binary was installed, not a Settings toggle.
 
@@ -28,11 +29,11 @@ Containers unpack OCI, then use the **same** Linux VM backend.
 - Machine profile schema (`virtual_machine` / `container`)
 - Slim NixOS guest artifacts (data). Embed in the iOS tipa only after Relay frames
 - vsock + waypipe into Wawona iland. IOMFB on TrollStore Mode B
-- Capability gates. tvOS / watchOS / visionOS stay forbidden
+- Capability gates. tvOS / watchOS stay forbidden; visionOS follows Apple-mobile StaticCpu
 
 ## Never
 
 - QEMU, TCTI, UTM, Spice, virgl, or `wwn-qemu-run`
 - Mode B engine inside an App Store IPA behind a toggle
-- VM machine kind on tvOS / watchOS / visionOS
+- VM machine kind on tvOS / watchOS
 - Document VM frames as done before Relay boots NixOS on that artifact

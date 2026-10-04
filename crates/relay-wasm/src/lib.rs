@@ -102,6 +102,12 @@ pub fn start(spec: &RelaySpec) -> Result<WasmHandle, RelayError> {
         }
     };
 
+    if matches!(plan.backend, RelayBackend::WasmWasmerWebKit) {
+        return Err(RelayError::Planned(
+            "iOS 27 Mode A Wasm starts through the Wasmer WASIX WKWebView host",
+        ));
+    }
+
     let id = format!("relay-wasm-{}-{}", std::process::id(), next_id());
     let backend = plan.backend;
     let guest = launch_guest(&module)?;
@@ -355,10 +361,15 @@ mod tests {
             machine_id: None,
             image,
             memory_mb: None,
+            disk_gib: None,
+            max_disk_gib: None,
             guest_page_size: None,
             guest: None,
             resources: None,
             ios_hv_host: None,
+            nixos_generation: None,
+            apple_os_major: None,
+            wasmer_webkit_linked: false,
         }
     }
 

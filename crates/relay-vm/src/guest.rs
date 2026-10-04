@@ -5,7 +5,7 @@ use crate::dtb;
 use crate::page_translate::PageTranslate;
 use relay_core::{GuestArtifact, GuestManifest, GuestPageSize, HostPageSize, RelayError};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read, path::PathBuf};
+use std::{collections::BTreeSet, fs, io::Read, path::PathBuf};
 
 #[allow(dead_code)] // Staged now; consumed by the Linux boot loader next.
 pub struct LoadedGuest {
@@ -31,16 +31,16 @@ pub struct LinuxBootState {
 }
 
 #[allow(dead_code)]
-const DTB_ADDRESS: u64 = 0x40000;
-#[allow(dead_code)]
-const KERNEL_ADDRESS: u64 = 0x80000;
-
+pub(crate) const GUEST_RAM_BASE: u64 = 0x4000_0000;
+const DTB_OFFSET: u64 = 0x40000;
 /// Stage verified kernel bytes and optional initrd at deterministic AArch64
 /// Linux physical addresses. The caller must still provide a valid DTB before
 /// it can transfer control to `entry_pc`.
 #[allow(dead_code)] // Staged separately so a manifest is never mistaken for boot.
 pub fn prepare_linux_boot(
     manifest: &GuestManifest,
+    kernel_address: u64,
+    kernel_memory_bytes: u64,
 ) -> Result<(LoadedGuest, LinuxBootState), RelayError> {
     // The immutable rootfs is a virtio-block backing store, never a second
     // in-RAM copy.  Verify it before allocating RAM, then stage only the
@@ -55,7 +55,7 @@ pub fn prepare_linux_boot(
     verify_artifact("rootfs", &manifest.rootfs)?;
     let mut guest = LoadedGuest {
         page_size,
-        memory: GuestMemory::allocate(page_size, manifest.memory_bytes)?,
+        memory: GuestMemory::allocate_at(page_size, GUEST_RAM_BASE, manifest.memory_bytes)?,
         kernel,
         initrd,
         rootfs_path: PathBuf::from(&manifest.rootfs.path),
@@ -63,10 +63,15 @@ pub fn prepare_linux_boot(
         // Keeping it empty here prevents a rootfs-sized duplicate allocation.
         rootfs: Vec::new(),
     };
-    let kernel_end = KERNEL_ADDRESS
-        .checked_add(guest.kernel.len() as u64)
+    if kernel_memory_bytes < guest.kernel.len() as u64 {
+        return Err(RelayError::Failed(
+            "ARM64 Image memory span is smaller than the kernel file".into(),
+        ));
+    }
+    let kernel_end = kernel_address
+        .checked_add(kernel_memory_bytes)
         .ok_or_else(|| RelayError::Failed("guest kernel placement overflow".into()))?;
-    guest.memory.write(KERNEL_ADDRESS, &guest.kernel)?;
+    guest.memory.write(kernel_address, &guest.kernel)?;
     let initrd_address = if let Some(initrd) = &guest.initrd {
         let address = align_up(kernel_end, guest.page_size.bytes() as u64)?;
         guest.memory.write(address, initrd)?;
@@ -83,18 +88,24 @@ pub fn prepare_linux_boot(
         )),
         _ => None,
     };
-    let dtb = dtb::build(manifest.memory_bytes, &manifest.command_line, initrd_range)?;
-    if DTB_ADDRESS + dtb.len() as u64 > KERNEL_ADDRESS {
+    let dtb_address = GUEST_RAM_BASE + DTB_OFFSET;
+    let dtb = dtb::build(
+        GUEST_RAM_BASE,
+        manifest.memory_bytes,
+        &manifest.command_line,
+        initrd_range,
+    )?;
+    if dtb_address + dtb.len() as u64 > kernel_address {
         return Err(RelayError::Failed(
             "Relay DTB and kernel layout overlap".into(),
         ));
     }
-    guest.memory.write(DTB_ADDRESS, &dtb)?;
+    guest.memory.write(dtb_address, &dtb)?;
     Ok((
         guest,
         LinuxBootState {
-            entry_pc: KERNEL_ADDRESS,
-            dtb_address: DTB_ADDRESS,
+            entry_pc: kernel_address,
+            dtb_address,
             initrd_address,
             command_line: manifest.command_line.clone(),
             dtb_bytes: dtb.len(),
@@ -116,15 +127,26 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, RelayError> {
 pub struct GuestMemory {
     page_size: GuestPageSize,
     translate: PageTranslate,
+    /// First guest-physical byte backed by this arena.
+    base: u64,
     /// Host arena length (may be larger than guest_bytes when rounded).
     guest_bytes: usize,
     bytes: Vec<u8>,
+    dirty_pages: BTreeSet<u64>,
 }
 
 #[allow(dead_code)] // Called by the staged Linux boot and MMU layers next.
 impl GuestMemory {
     pub fn allocate(page_size: GuestPageSize, bytes: u64) -> Result<Self, RelayError> {
-        Self::allocate_on_host(page_size, HostPageSize::detect(), bytes)
+        Self::allocate_at_on_host(page_size, HostPageSize::detect(), 0, bytes)
+    }
+
+    pub fn allocate_at(
+        page_size: GuestPageSize,
+        base: u64,
+        bytes: u64,
+    ) -> Result<Self, RelayError> {
+        Self::allocate_at_on_host(page_size, HostPageSize::detect(), base, bytes)
     }
 
     /// Allocate guest RAM mapped onto an explicit host page size.
@@ -133,6 +155,22 @@ impl GuestMemory {
         host: HostPageSize,
         bytes: u64,
     ) -> Result<Self, RelayError> {
+        Self::allocate_at_on_host(page_size, host, 0, bytes)
+    }
+
+    fn allocate_at_on_host(
+        page_size: GuestPageSize,
+        host: HostPageSize,
+        base: u64,
+        bytes: u64,
+    ) -> Result<Self, RelayError> {
+        if !base.is_multiple_of(page_size.bytes() as u64) {
+            return Err(RelayError::Failed(
+                "guest RAM base is not guest-page aligned".into(),
+            ));
+        }
+        base.checked_add(bytes)
+            .ok_or_else(|| RelayError::Failed("guest RAM range overflow".into()))?;
         let translate = PageTranslate::new(page_size, host)?;
         let arena = translate.host_arena_bytes(bytes)?;
         let guest_len = usize::try_from(bytes)
@@ -142,8 +180,10 @@ impl GuestMemory {
         Ok(Self {
             page_size,
             translate,
+            base,
             guest_bytes: guest_len,
             bytes: vec![0; arena_len],
+            dirty_pages: BTreeSet::new(),
         })
     }
 
@@ -172,11 +212,52 @@ impl GuestMemory {
     pub fn write(&mut self, address: u64, input: &[u8]) -> Result<(), RelayError> {
         let range = self.range(address, input.len())?;
         self.bytes[range].copy_from_slice(input);
+        if !input.is_empty() {
+            let page_bytes = self.page_size.bytes() as u64;
+            let first = (address - self.base) / page_bytes;
+            let last_address = address
+                .checked_add(input.len() as u64 - 1)
+                .ok_or_else(|| RelayError::Failed("guest dirty range overflow".into()))?;
+            let last = (last_address - self.base) / page_bytes;
+            self.dirty_pages.extend(first..=last);
+        }
         Ok(())
     }
 
+    pub(crate) fn clear_dirty_pages(&mut self) {
+        self.dirty_pages.clear();
+    }
+
+    pub(crate) fn take_dirty_page_hashes(&mut self) -> Result<Vec<(u64, [u8; 32])>, RelayError> {
+        let page_bytes = self.page_size.bytes() as usize;
+        let pages = std::mem::take(&mut self.dirty_pages);
+        pages
+            .into_iter()
+            .map(|page| {
+                let offset = page
+                    .checked_mul(page_bytes as u64)
+                    .ok_or_else(|| RelayError::Failed("guest dirty page offset overflow".into()))?;
+                let address = self.base.checked_add(offset).ok_or_else(|| {
+                    RelayError::Failed("guest dirty page address overflow".into())
+                })?;
+                let range = self.range(address, page_bytes)?;
+                Ok((address, Sha256::digest(&self.bytes[range]).into()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn check_range(&self, address: u64, len: usize) -> Result<(), RelayError> {
+        self.range(address, len).map(|_| ())
+    }
+
     fn range(&self, address: u64, len: usize) -> Result<std::ops::Range<usize>, RelayError> {
-        let offset = self.translate.guest_to_host_offset(address)?;
+        let guest_offset = address.checked_sub(self.base).ok_or_else(|| {
+            RelayError::Failed(format!(
+                "guest physical memory access below RAM address={address:#x} base={:#x}",
+                self.base
+            ))
+        })?;
+        let offset = self.translate.guest_to_host_offset(guest_offset)?;
         let start = usize::try_from(offset)
             .map_err(|_| RelayError::Failed("guest address does not fit this host".into()))?;
         let end = start
@@ -430,14 +511,15 @@ mod tests {
             compatibility: relay_core::GuestCompatibility::default(),
             signature: None,
         };
-        let (guest, state) = prepare_linux_boot(&manifest).unwrap();
-        assert_eq!(state.entry_pc, KERNEL_ADDRESS);
-        assert_eq!(state.initrd_address, Some(KERNEL_ADDRESS + 4096));
+        let kernel_address = GUEST_RAM_BASE + 0x80000;
+        let (guest, state) = prepare_linux_boot(&manifest, kernel_address, 4).unwrap();
+        assert_eq!(state.entry_pc, kernel_address);
+        assert_eq!(state.initrd_address, Some(kernel_address + 4096));
         assert!(state.dtb_bytes > 40);
         let mut loaded_kernel = [0; 4];
         guest
             .memory
-            .read(KERNEL_ADDRESS, &mut loaded_kernel)
+            .read(kernel_address, &mut loaded_kernel)
             .unwrap();
         assert_eq!(loaded_kernel, [1, 2, 3, 4]);
         assert!(guest.rootfs.is_empty(), "rootfs is virtio-block backed");

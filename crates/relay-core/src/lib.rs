@@ -3,9 +3,11 @@
 //! Wawona UI never picks a hypervisor. Relay resolves the backend: VZ on
 //! macOS, KVM on Linux, `IosHv` on Mode B iOS/iPadOS when the host probe
 //! matches the public HV window, otherwise static CPU. Wasm is Pulley on
-//! Apple mobile regardless.
+//! Apple mobile through iOS 26. iOS and iPadOS 27 Mode A use Wasmer WASIX
+//! in WebKit when that SDK is linked.
 
 pub mod ios_hv;
+pub mod nix_editor;
 
 pub use ios_hv::{live_ios_hv_host, probe_ios_hv, IosHvHost, IosHvProbe};
 
@@ -49,6 +51,9 @@ pub enum RelayBackend {
     IosHv,
     WasmPulley,
     WasmCranelift,
+    /// iOS/iPadOS 27+ Mode A. Hidden WKWebView, WebKit JIT, JSPI, Wasmer WASIX.
+    /// Same `/wasm/v1` bytecode. Not Cranelift and not `MAP_JIT`.
+    WasmWasmerWebKit,
 }
 
 impl RelayBackend {
@@ -64,6 +69,7 @@ impl RelayBackend {
             Self::IosHv => "ios-hv",
             Self::WasmPulley => "wasm-pulley",
             Self::WasmCranelift => "wasm-cranelift",
+            Self::WasmWasmerWebKit => "wasm-wasmer-webkit",
         }
     }
 
@@ -109,7 +115,8 @@ impl RelayMachineProfile {
             )));
         }
         let id = self.id.trim();
-        if id.is_empty()
+        if matches!(id, "." | "..")
+            || id.is_empty()
             || id.len() > 128
             || !id
                 .bytes()
@@ -168,10 +175,15 @@ impl RelayMachineProfile {
             machine_id: Some(self.id.clone()),
             image: self.image.clone(),
             memory_mb: Some(self.memory_mb),
+            disk_gib: Some(self.disk_gib),
+            max_disk_gib: Some(self.max_disk_gib),
             guest_page_size: Some(self.guest.page_size),
             guest: Some(self.guest.clone()),
             resources: None,
             ios_hv_host: None,
+            nixos_generation: None,
+            apple_os_major: None,
+            wasmer_webkit_linked: false,
         })
     }
 }
@@ -271,6 +283,10 @@ pub struct RelaySpec {
     pub image: Option<String>,
     #[serde(default)]
     pub memory_mb: Option<u32>,
+    #[serde(default)]
+    pub disk_gib: Option<u32>,
+    #[serde(default)]
+    pub max_disk_gib: Option<u32>,
     /// `None` selects host page geometry at runtime. Do not serialize the
     /// builder host page size into an iOS machine profile.
     #[serde(default)]
@@ -287,7 +303,22 @@ pub struct RelaySpec {
     /// spec. A Mode B iOS process fills this from sysctl when it is `None`.
     #[serde(default)]
     pub ios_hv_host: Option<IosHvHost>,
+    /// NixOS system generation to point `system` at before this start.
+    /// Absent leaves the disk's current profile alone. Boot stays `init=/init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nixos_generation: Option<u32>,
+    /// Apple OS major (`NSProcessInfo`). Absent means "not iOS 27", so Wasm
+    /// stays on Pulley. Never raise the deployment target to populate this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_os_major: Option<u32>,
+    /// True only when this binary linked WasmerSDK (iPhoneOS SDK 27+).
+    /// iOS 27 without the SDK stays on Pulley.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wasmer_webkit_linked: bool,
 }
+
+/// First iOS/iPadOS major that may execute Mode A Wasm with Wasmer WASIX.
+pub const WASMER_WEBKIT_MIN_MAJOR: u32 = 27;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayRuntimeResources {
@@ -358,6 +389,30 @@ pub struct GuestManifestSignature {
     pub value: String,
 }
 
+impl RelaySpec {
+    pub fn vm_memory_bytes(&self, default: u64) -> Result<u64, RelayError> {
+        let Some(mb) = self.memory_mb else {
+            return Ok(default);
+        };
+        if !(RelayMachineProfile::MIN_MEMORY_MB..=RelayMachineProfile::MAX_MEMORY_MB).contains(&mb)
+        {
+            return Err(RelayError::Failed(
+                "VM memory is outside Relay limits".into(),
+            ));
+        }
+        Ok(u64::from(mb) * 1024 * 1024)
+    }
+    pub fn vm_disk_limits(&self) -> Result<(u32, u32), RelayError> {
+        let size = self.disk_gib.unwrap_or(4);
+        let quota = self.max_disk_gib.unwrap_or(64);
+        if quota > 64 {
+            return Err(RelayError::Failed("VM disk quota exceeds 64 GiB".into()));
+        }
+        DiskResizePlan::from_slider(4, size, quota, false)?;
+        Ok((size, quota))
+    }
+}
+
 /// Pure Relay domain result consumed by native disk-size sliders. Values are
 /// GiB so the UI has predictable discrete steps on phone and desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +423,7 @@ pub struct DiskResizePlan {
 
 impl DiskResizePlan {
     pub const MIN_GIB: u32 = 4;
+    pub const MAX_GIB: u32 = 64;
 
     pub fn from_slider(
         current_gib: u32,
@@ -390,7 +446,7 @@ impl DiskResizePlan {
                 "Relay virtual disks are grow-only".into(),
             ));
         }
-        if target_gib > max_gib {
+        if target_gib > max_gib || max_gib > Self::MAX_GIB {
             return Err(RelayError::Failed(
                 "requested disk size exceeds machine quota".into(),
             ));
@@ -539,34 +595,48 @@ pub fn resolve_backend(spec: &RelaySpec) -> Result<RelayBackend, RelayError> {
 }
 
 fn resolve_wasm(spec: &RelaySpec) -> Result<RelayBackend, RelayError> {
-    // No Mode B wasm catalog. Same /wasm/v1 bytecode. Mode B may execute
-    // it (Pulley on Apple mobile; Cranelift only where Mode A already does).
-    // Android Play Mode A stays Pulley (store-safe). Mode B Android may use
-    // Cranelift.
+    // No Mode B wasm catalog. Same /wasm/v1 bytecode.
+    // Android Play Mode A stays Pulley. Mode B Android may use Cranelift.
+    // macOS and Linux stay on Wasmtime Cranelift (not a second Wasmer engine).
+    // iOS/iPadOS 13-26 Mode A is Pulley. iOS/iPadOS 27+ Mode A is Wasmer WASIX
+    // inside WebKit only when this binary linked WasmerSDK. Otherwise Pulley.
+    // tvOS, watchOS, and visionOS stay Pulley. Cranelift and MAP_JIT stay out
+    // of App Store Apple-mobile artifacts.
     match spec.platform {
         RelayPlatform::Macos | RelayPlatform::Linux => Ok(RelayBackend::WasmCranelift),
         RelayPlatform::Android => match spec.artifact {
             ArtifactClass::ModeA => Ok(RelayBackend::WasmPulley),
             ArtifactClass::ModeB => Ok(RelayBackend::WasmCranelift),
         },
-        RelayPlatform::Ios
-        | RelayPlatform::Ipados
-        | RelayPlatform::Tvos
-        | RelayPlatform::Watchos
-        | RelayPlatform::Visionos => Ok(RelayBackend::WasmPulley),
+        RelayPlatform::Ios | RelayPlatform::Ipados => Ok(resolve_ios_wasm(spec)),
+        RelayPlatform::Tvos | RelayPlatform::Watchos | RelayPlatform::Visionos => {
+            Ok(RelayBackend::WasmPulley)
+        }
+    }
+}
+
+fn resolve_ios_wasm(spec: &RelaySpec) -> RelayBackend {
+    let os_ok = spec
+        .apple_os_major
+        .is_some_and(|major| major >= WASMER_WEBKIT_MIN_MAJOR);
+    if spec.artifact == ArtifactClass::ModeA && os_ok && spec.wasmer_webkit_linked {
+        RelayBackend::WasmWasmerWebKit
+    } else {
+        RelayBackend::WasmPulley
     }
 }
 
 fn resolve_linux_vm(spec: &RelaySpec) -> Result<RelayBackend, RelayError> {
     match spec.platform {
-        RelayPlatform::Tvos | RelayPlatform::Watchos | RelayPlatform::Visionos => {
-            Err(RelayError::Forbidden(
-                "VM and container machine kinds are forbidden on tvOS/watchOS/visionOS",
-            ))
-        }
+        RelayPlatform::Tvos | RelayPlatform::Watchos => Err(RelayError::Forbidden(
+            "VM and container machine kinds are forbidden on tvOS/watchOS",
+        )),
         RelayPlatform::Macos => Ok(RelayBackend::Vz),
         RelayPlatform::Linux => Ok(RelayBackend::KvmCloudHypervisor),
         RelayPlatform::Ios | RelayPlatform::Ipados => Ok(resolve_ios_linux_vm(spec)),
+        // visionOS ships the store-safe Apple-mobile static CPU.  It does not
+        // inherit iOS/iPadOS's historical Mode B Hypervisor.framework window.
+        RelayPlatform::Visionos => Ok(RelayBackend::StaticCpu),
         RelayPlatform::Android => match spec.artifact {
             ArtifactClass::ModeA => Err(RelayError::Planned(
                 "Android Play Linux VMs wait on Relay static CPU. No AVF, no QEMU, no proot",
@@ -605,11 +675,37 @@ mod tests {
             machine_id: None,
             image: None,
             memory_mb: None,
+            disk_gib: None,
+            max_disk_gib: None,
             guest_page_size: None,
             guest: None,
             resources: None,
             ios_hv_host: None,
+            nixos_generation: None,
+            apple_os_major: None,
+            wasmer_webkit_linked: false,
         }
+    }
+
+    #[test]
+    fn vm_settings_round_trip_and_enforce_capacity_limits() {
+        let mut value = spec(RelayKind::Vm, RelayPlatform::Ios, ArtifactClass::ModeA);
+        assert_eq!(value.vm_memory_bytes(512 << 20).unwrap(), 512 << 20);
+        assert_eq!(value.vm_disk_limits().unwrap(), (4, 64));
+        value.memory_mb = Some(2048);
+        value.disk_gib = Some(12);
+        value.max_disk_gib = Some(16);
+        let json = serde_json::to_string(&value).unwrap();
+        let mut decoded: RelaySpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.vm_memory_bytes(512 << 20).unwrap(), 2 << 30);
+        assert_eq!(decoded.vm_disk_limits().unwrap(), (12, 16));
+        decoded.memory_mb = Some(255);
+        assert!(decoded.vm_memory_bytes(512 << 20).is_err());
+        decoded.disk_gib = Some(17);
+        assert!(decoded.vm_disk_limits().is_err());
+        decoded.disk_gib = Some(4);
+        decoded.max_disk_gib = Some(65);
+        assert!(decoded.vm_disk_limits().is_err());
     }
 
     #[test]
@@ -677,6 +773,18 @@ mod tests {
     }
 
     #[test]
+    fn visionos_vm_and_container_use_the_ios_static_cpu() {
+        for kind in [RelayKind::Vm, RelayKind::Container] {
+            for artifact in [ArtifactClass::ModeA, ArtifactClass::ModeB] {
+                assert_eq!(
+                    resolve_backend(&spec(kind, RelayPlatform::Visionos, artifact)).unwrap(),
+                    RelayBackend::StaticCpu
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ios_mode_b_vm_stays_static_without_host_facts() {
         let b = resolve_backend(&spec(
             RelayKind::Vm,
@@ -739,6 +847,68 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(b, RelayBackend::WasmPulley);
+    }
+
+    fn wasm_at(
+        platform: RelayPlatform,
+        artifact: ArtifactClass,
+        major: u32,
+        linked: bool,
+    ) -> RelayBackend {
+        let mut s = spec(RelayKind::Wasm, platform, artifact);
+        s.apple_os_major = Some(major);
+        s.wasmer_webkit_linked = linked;
+        resolve_backend(&s).unwrap()
+    }
+
+    #[test]
+    fn ios_26_mode_a_wasm_stays_pulley_even_if_sdk_flag_is_set() {
+        assert_eq!(
+            wasm_at(RelayPlatform::Ios, ArtifactClass::ModeA, 26, true),
+            RelayBackend::WasmPulley
+        );
+    }
+
+    #[test]
+    fn ios_27_mode_a_without_wasmer_sdk_stays_pulley() {
+        assert_eq!(
+            wasm_at(RelayPlatform::Ios, ArtifactClass::ModeA, 27, false),
+            RelayBackend::WasmPulley
+        );
+        assert_eq!(
+            wasm_at(RelayPlatform::Ipados, ArtifactClass::ModeA, 27, false),
+            RelayBackend::WasmPulley
+        );
+    }
+
+    #[test]
+    fn ios_27_mode_a_with_wasmer_sdk_uses_webkit() {
+        assert_eq!(
+            wasm_at(RelayPlatform::Ios, ArtifactClass::ModeA, 27, true),
+            RelayBackend::WasmWasmerWebKit
+        );
+        assert_eq!(
+            wasm_at(RelayPlatform::Ipados, ArtifactClass::ModeA, 27, true),
+            RelayBackend::WasmWasmerWebKit
+        );
+    }
+
+    #[test]
+    fn ios_27_mode_b_and_other_apple_mobile_stay_pulley() {
+        assert_eq!(
+            wasm_at(RelayPlatform::Ios, ArtifactClass::ModeB, 27, true),
+            RelayBackend::WasmPulley
+        );
+        for platform in [
+            RelayPlatform::Tvos,
+            RelayPlatform::Watchos,
+            RelayPlatform::Visionos,
+        ] {
+            assert_eq!(
+                wasm_at(platform, ArtifactClass::ModeA, 27, true),
+                RelayBackend::WasmPulley
+            );
+        }
     }
 
     #[test]

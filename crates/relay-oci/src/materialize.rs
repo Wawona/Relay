@@ -32,6 +32,8 @@ pub fn materialize_runtime_bundle(
     let config_bytes = fs::read(blob_path(layout_root, &layout.config_digest)?)
         .map_err(|error| RelayError::Failed(format!("cannot read OCI config blob: {error}")))?;
 
+    // Reject unsupported process contracts before replacing an existing bundle.
+    let process = runtime_process_from_config(&config_bytes)?;
     let rootfs = destination.join("rootfs");
     if destination.exists() {
         fs::remove_dir_all(destination).map_err(|error| {
@@ -52,7 +54,6 @@ pub fn materialize_runtime_bundle(
         apply_layer(descriptor, &bytes, &rootfs)?;
     }
 
-    let process = runtime_process_from_config(&config_bytes, false)?;
     write_runtime_config(destination, process, false)?;
 
     Ok(RuntimeBundle {
@@ -147,10 +148,7 @@ fn write_runtime_config(
     Ok(())
 }
 
-fn runtime_process_from_config(
-    config_bytes: &[u8],
-    force_ready_shell: bool,
-) -> Result<serde_json::Value, RelayError> {
+fn runtime_process_from_config(config_bytes: &[u8]) -> Result<serde_json::Value, RelayError> {
     #[derive(serde::Deserialize)]
     struct ProcessConfig {
         #[serde(default)]
@@ -165,7 +163,7 @@ fn runtime_process_from_config(
         #[serde(default)]
         #[serde(rename = "WorkingDir")]
         working_dir: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "User", alias = "user")]
         user: Option<String>,
     }
     #[derive(serde::Deserialize)]
@@ -183,29 +181,14 @@ fn runtime_process_from_config(
         working_dir: None,
         user: None,
     });
-    let mut args = Vec::new();
-    if force_ready_shell {
-        args.push("sh".into());
-        args.push("-c".into());
-        args.push(
-            "printf 'WAWONA_OCI_READY=1\\n' > /dev/console; printf 'WAWONA_OCI_READY=1\\n' > /dev/hvc0; sleep infinity"
-                .into(),
-        );
-    } else {
-        if let Some(entrypoint) = cfg.entrypoint {
-            args.extend(entrypoint);
-        }
-        if let Some(cmd) = cfg.cmd {
-            args.extend(cmd);
-        }
-        if args.is_empty() {
-            args.push("sh".into());
-            args.push("-c".into());
-            args.push(
-                "printf 'WAWONA_OCI_READY=1\\n' > /dev/console; printf 'WAWONA_OCI_READY=1\\n' > /dev/hvc0; sleep infinity"
-                    .into(),
-            );
-        }
+    let args: Vec<String> = cfg
+        .entrypoint
+        .unwrap_or_default()
+        .into_iter()
+        .chain(cfg.cmd.unwrap_or_default())
+        .collect();
+    if args.first().is_none_or(|arg| arg.is_empty()) {
+        return Err(failed("OCI image has no executable Entrypoint or Cmd"));
     }
     let mut env = cfg.env.unwrap_or_default();
     if !env.iter().any(|value| value.starts_with("PATH=")) {
@@ -218,7 +201,7 @@ fn runtime_process_from_config(
         .working_dir
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "/".into());
-    let (uid, gid) = parse_user(cfg.user.as_deref());
+    let (uid, gid) = parse_user(cfg.user.as_deref())?;
     Ok(json!({
         "terminal": false,
         "user": {"uid": uid, "gid": gid},
@@ -228,77 +211,99 @@ fn runtime_process_from_config(
     }))
 }
 
-fn parse_user(user: Option<&str>) -> (u32, u32) {
+fn parse_user(user: Option<&str>) -> Result<(u32, u32), RelayError> {
     let Some(user) = user.filter(|value| !value.is_empty()) else {
-        return (0, 0);
+        return Ok((0, 0));
     };
-    if let Ok(uid) = user.parse::<u32>() {
-        return (uid, uid);
+    // A UID alone can inherit a primary/supplementary group from the image.
+    // Until confined account-file resolution exists, require both numeric IDs
+    // rather than guessing those groups or silently escalating to root.
+    let (uid, gid) = user
+        .split_once(':')
+        .ok_or_else(|| failed("OCI User needs account resolution; use explicit numeric uid:gid"))?;
+    let numeric_id = |value: &str| {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        value.parse::<u32>().ok().filter(|id| *id != u32::MAX)
+    };
+    match (numeric_id(uid), numeric_id(gid)) {
+        (Some(uid), Some(gid)) => Ok((uid, gid)),
+        _ => Err(failed(
+            "OCI User requires valid numeric uid:gid; account names are not yet resolved",
+        )),
     }
-    if let Some((uid, gid)) = user.split_once(':') {
-        return (uid.parse().unwrap_or(0), gid.parse().unwrap_or(0));
-    }
-    (0, 0)
 }
 
 fn apply_layer(descriptor: &Descriptor, bytes: &[u8], rootfs: &Path) -> Result<(), RelayError> {
-    let reader: Box<dyn Read> = if descriptor.media_type.ends_with("+gzip") {
-        Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes)))
-    } else if descriptor.media_type.ends_with("+zstd") {
-        Box::new(
-            zstd::stream::read::Decoder::new(Cursor::new(bytes))
-                .map_err(|error| RelayError::Failed(format!("invalid zstd OCI layer: {error}")))?,
-        )
-    } else {
-        Box::new(Cursor::new(bytes))
-    };
-    let mut archive = tar::Archive::new(reader);
-    archive.set_preserve_permissions(true);
-    for entry in archive
-        .entries()
-        .map_err(|error| RelayError::Failed(format!("invalid OCI layer tar: {error}")))?
-    {
-        let mut entry = entry
-            .map_err(|error| RelayError::Failed(format!("invalid OCI layer entry: {error}")))?;
-        let path = entry
-            .path()
-            .map_err(|error| RelayError::Failed(format!("invalid OCI layer path: {error}")))?
-            .into_owned();
-        let file_name = match path.file_name().and_then(|name| name.to_str()) {
-            Some(name) => name.to_string(),
-            None => continue,
+    // Whiteouts affect lower layers only, regardless of archive entry order.
+    // Replay the compressed input instead of retaining decompressed payloads.
+    for whiteouts in [true, false] {
+        let reader: Box<dyn Read> = if descriptor.media_type.ends_with("+gzip") {
+            Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes)))
+        } else if descriptor.media_type.ends_with("+zstd") {
+            Box::new(
+                zstd::stream::read::Decoder::new(Cursor::new(bytes)).map_err(|error| {
+                    RelayError::Failed(format!("invalid zstd OCI layer: {error}"))
+                })?,
+            )
+        } else {
+            Box::new(Cursor::new(bytes))
         };
-        let parent = path.parent().unwrap_or_else(|| Path::new(""));
-        if file_name == WHITEOUT_OPAQUE {
-            let dir = safe_join(rootfs, parent)?;
-            if dir.is_dir() {
-                for child in fs::read_dir(&dir).map_err(|error| {
-                    RelayError::Failed(format!("cannot clear opaque OCI dir: {error}"))
-                })? {
-                    let child = child.map_err(|error| {
+        let mut archive = tar::Archive::new(reader);
+        archive.set_preserve_permissions(true);
+        for entry in archive
+            .entries()
+            .map_err(|error| RelayError::Failed(format!("invalid OCI layer tar: {error}")))?
+        {
+            let mut entry = entry
+                .map_err(|error| RelayError::Failed(format!("invalid OCI layer entry: {error}")))?;
+            let path = entry
+                .path()
+                .map_err(|error| RelayError::Failed(format!("invalid OCI layer path: {error}")))?
+                .into_owned();
+            let file_name = match path.file_name().and_then(|name| name.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            if file_name.starts_with(WHITEOUT_PREFIX) != whiteouts {
+                continue;
+            }
+            let parent = path.parent().unwrap_or_else(|| Path::new(""));
+            if file_name == WHITEOUT_OPAQUE {
+                let dir = safe_join(rootfs, parent)?;
+                check_layer_directory(&dir)?;
+                if dir.is_dir() {
+                    for child in fs::read_dir(&dir).map_err(|error| {
                         RelayError::Failed(format!("cannot clear opaque OCI dir: {error}"))
-                    })?;
-                    remove_path(&child.path())?;
+                    })? {
+                        let child = child.map_err(|error| {
+                            RelayError::Failed(format!("cannot clear opaque OCI dir: {error}"))
+                        })?;
+                        remove_path(&child.path())?;
+                    }
+                }
+                continue;
+            }
+            if let Some(target) = file_name.strip_prefix(WHITEOUT_PREFIX) {
+                if matches!(target, "" | "." | "..") {
+                    return Err(failed("invalid OCI whiteout basename"));
+                }
+                remove_path(&safe_join(rootfs, &parent.join(target))?)?;
+                continue;
+            }
+            let dest = safe_join(rootfs, &path)?;
+            if let Ok(metadata) = fs::symlink_metadata(&dest) {
+                if !(entry.header().entry_type().is_dir() && metadata.is_dir()) {
+                    remove_path(&dest)?;
                 }
             }
-            continue;
+            if !entry.unpack_in(rootfs).map_err(|error| {
+                RelayError::Failed(format!("cannot unpack OCI layer entry: {error}"))
+            })? {
+                return Err(failed("OCI layer entry was not confined to the rootfs"));
+            }
         }
-        if let Some(target) = file_name.strip_prefix(WHITEOUT_PREFIX) {
-            remove_path(&safe_join(rootfs, &parent.join(target))?)?;
-            continue;
-        }
-        let dest = safe_join(rootfs, &path)?;
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                RelayError::Failed(format!("cannot create OCI rootfs parents: {error}"))
-            })?;
-        }
-        if entry.header().entry_type() != tar::EntryType::Directory && dest.exists() {
-            remove_path(&dest)?;
-        }
-        entry.unpack(&dest).map_err(|error| {
-            RelayError::Failed(format!("cannot unpack OCI layer entry: {error}"))
-        })?;
     }
     Ok(())
 }
@@ -311,7 +316,10 @@ fn safe_join(base: &Path, rel: &Path) -> Result<PathBuf, RelayError> {
     }
     for component in components {
         match component {
-            Component::Normal(part) => out.push(part),
+            Component::Normal(part) => {
+                check_layer_directory(&out)?;
+                out.push(part);
+            }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(failed("OCI layer path escapes the rootfs"));
@@ -319,6 +327,20 @@ fn safe_join(base: &Path, rel: &Path) -> Result<PathBuf, RelayError> {
         }
     }
     Ok(out)
+}
+
+// Reject archive-created symlink ancestors before writes or deletions. This
+// does not protect against a concurrent external process replacing ancestors;
+// materialization still requires an exclusively owned destination directory.
+fn check_layer_directory(path: &Path) -> Result<(), RelayError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(failed("OCI layer ancestor is not a real directory")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RelayError::Failed(format!(
+            "cannot inspect OCI directory: {error}"
+        ))),
+    }
 }
 
 fn remove_path(path: &Path) -> Result<(), RelayError> {
@@ -343,6 +365,133 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    #[cfg(unix)]
+    #[test]
+    fn layer_rejects_symlink_ancestor_writes_and_whiteouts() {
+        for path in ["link/keep", "link/.wh.keep", "link/.wh..wh..opq"] {
+            let base = std::env::temp_dir().join(format!(
+                "relay-oci-confinement-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let rootfs = base.join("rootfs");
+            let outside = base.join("outside");
+            fs::create_dir_all(&rootfs).unwrap();
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("keep"), b"original").unwrap();
+            std::os::unix::fs::symlink(&outside, rootfs.join("link")).unwrap();
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(7);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, b"changed".as_slice()).unwrap();
+            let bytes = builder.into_inner().unwrap();
+            let descriptor: Descriptor = serde_json::from_value(json!({
+                "mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": "unused", "size": bytes.len()
+            })).unwrap();
+            let result = apply_layer(&descriptor, &bytes, &rootfs);
+            let preserved = fs::read(outside.join("keep")).ok();
+            fs::remove_dir_all(base).unwrap();
+            assert!(result.is_err(), "accepted escaping entry {path}");
+            assert_eq!(
+                preserved.as_deref(),
+                Some(b"original".as_slice()),
+                "outside data changed for {path}"
+            );
+        }
+    }
+
+    fn apply_test_layer(
+        rootfs: &Path,
+        entries: &[(&str, tar::EntryType, &str, &[u8])],
+    ) -> Result<(), RelayError> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, kind, link, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_entry_type(*kind);
+            if !link.is_empty() {
+                header.set_link_name(link).unwrap();
+            }
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, *data).unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        let descriptor: Descriptor = serde_json::from_value(json!({
+            "mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": "unused", "size": bytes.len()
+        })).unwrap();
+        apply_layer(&descriptor, &bytes, rootfs)
+    }
+
+    #[test]
+    fn layer_whiteouts_preserve_current_layer_files_and_reject_empty_basename() {
+        let root = std::env::temp_dir().join(format!(
+            "relay-oci-whiteout-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("dir/old"), b"old").unwrap();
+        fs::write(root.join("replace"), b"old").unwrap();
+        apply_test_layer(
+            &root,
+            &[
+                ("dir/new", tar::EntryType::Regular, "", b"new"),
+                ("replace", tar::EntryType::Regular, "", b"replacement"),
+                ("dir/.wh..wh..opq", tar::EntryType::Regular, "", b""),
+                (".wh.replace", tar::EntryType::Regular, "", b""),
+            ],
+        )
+        .unwrap();
+        assert!(!root.join("dir/old").exists());
+        assert_eq!(fs::read(root.join("dir/new")).unwrap(), b"new");
+        assert_eq!(fs::read(root.join("replace")).unwrap(), b"replacement");
+        for name in [".wh.", ".wh..", ".wh..."] {
+            assert!(apply_test_layer(&root, &[(name, tar::EntryType::Regular, "", b"")]).is_err());
+            assert!(root.join("replace").is_file());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn layer_confines_hardlinks_and_replaces_symlink_leaf() {
+        let base = std::env::temp_dir().join(format!(
+            "relay-oci-links-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let root = base.join("rootfs");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(base.join("outside"), b"outside").unwrap();
+        assert!(
+            apply_test_layer(&root, &[("bad", tar::EntryType::Link, "../outside", b"")]).is_err()
+        );
+        assert!(!root.join("bad").exists());
+        apply_test_layer(
+            &root,
+            &[
+                ("file", tar::EntryType::Regular, "", b"inside"),
+                ("link", tar::EntryType::Link, "file", b""),
+                ("dangling", tar::EntryType::Symlink, "missing", b""),
+            ],
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join("link")).unwrap(), b"inside");
+        apply_test_layer(
+            &root,
+            &[("dangling", tar::EntryType::Regular, "", b"replacement")],
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join("dangling")).unwrap(), b"replacement");
+        assert_eq!(fs::read(base.join("outside")).unwrap(), b"outside");
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn slim_bundle_writes_config_and_rootfs() {
@@ -405,6 +554,7 @@ mod tests {
             "os": "linux",
             "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{diff_id}")]},
             "config": {
+                "User": "1000:1001",
                 "Cmd": ["echo", "hi"],
                 "Env": ["PATH=/bin"]
             }
@@ -457,7 +607,73 @@ mod tests {
             fs::read_to_string(bundle.root.join("rootfs/hello.txt")).unwrap(),
             "hello"
         );
+        let runtime: serde_json::Value =
+            serde_json::from_slice(&fs::read(bundle.root.join("config.json")).unwrap()).unwrap();
+        assert_eq!(
+            runtime["process"]["user"],
+            json!({"uid": 1000, "gid": 1001})
+        );
+        assert_eq!(runtime["process"]["args"], json!(["echo", "hi"]));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(dest);
+    }
+    #[test]
+    fn process_identity_preserves_numeric_ids_and_rejects_unresolved_users() {
+        for (user, expected) in [
+            (None, (0, 0)),
+            (Some(""), (0, 0)),
+            (Some("0:0"), (0, 0)),
+            (Some("123:456"), (123, 456)),
+            (Some("4294967294:4294967294"), (u32::MAX - 1, u32::MAX - 1)),
+        ] {
+            let bytes =
+                serde_json::to_vec(&json!({"config": {"User": user, "Cmd": ["true"]}})).unwrap();
+            let process = runtime_process_from_config(&bytes).unwrap();
+            assert_eq!(
+                process["user"],
+                json!({"uid": expected.0, "gid": expected.1})
+            );
+        }
+        for user in [
+            "alice",
+            "1000",
+            "0",
+            "alice:staff",
+            "1000:staff",
+            "alice:1000",
+            ":1",
+            "1:",
+            "1:2:3",
+            "-1:0",
+            "+1:0",
+            " 1:0",
+            "1:0 ",
+            "1:4294967295",
+            "4294967295:1",
+            "4294967296:1",
+            "１２:0",
+        ] {
+            let bytes =
+                serde_json::to_vec(&json!({"config": {"User": user, "Cmd": ["true"]}})).unwrap();
+            assert!(
+                runtime_process_from_config(&bytes).is_err(),
+                "accepted {user:?}"
+            );
+        }
+        assert!(runtime_process_from_config(
+            br#"{"config":{"User":"1:2","user":"0:0","Cmd":["true"]}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn process_command_never_substitutes_a_readiness_shell() {
+        for config in [json!({}), json!({"Cmd": []}), json!({"Cmd": [""]})] {
+            let bytes = serde_json::to_vec(&json!({"config": config})).unwrap();
+            assert!(runtime_process_from_config(&bytes).is_err());
+        }
+        let process = runtime_process_from_config(br#"{"config":{"Entrypoint":["/app","--flag"],"Cmd":["argument"],"WorkingDir":"/work","Env":["PATH=/app"]}}"#).unwrap();
+        assert_eq!(process["args"], json!(["/app", "--flag", "argument"]));
+        assert_eq!(process["cwd"], "/work");
     }
 }
