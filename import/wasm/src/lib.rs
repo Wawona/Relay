@@ -7,6 +7,7 @@ pub mod interrupt;
 pub mod p1;
 pub mod p2;
 pub mod sandbox;
+pub mod vk_board;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -40,7 +41,9 @@ fn build_engine() -> Result<Engine> {
     // macOS-only feature and must never be compiled into iphoneos slices.
     #[cfg(feature = "pulley")]
     {
-        config.target("pulley64").context("Config::target(pulley64)")?;
+        config
+            .target("pulley64")
+            .context("Config::target(pulley64)")?;
     }
     #[cfg(all(feature = "cranelift-native", not(feature = "pulley")))]
     {
@@ -75,7 +78,10 @@ pub fn run_args(args: &[String]) -> Result<i32> {
         bail!("not a file: {}", path.display());
     }
     if !sandbox::is_wasm_magic(&path) {
-        bail!("{} is not a WASM module (missing \\0asm magic)", path.display());
+        bail!(
+            "{} is not a WASM module (missing \\0asm magic)",
+            path.display()
+        );
     }
     let guest_args = if args
         .first()

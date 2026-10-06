@@ -71,7 +71,9 @@ fn read_guest_str(mem: &[u8], ptr: u32, len: u32) -> Result<String, i32> {
     let start = ptr as usize;
     let end = start.checked_add(len as usize).ok_or(EINVAL)?;
     let bytes = mem.get(start..end).ok_or(EINVAL)?;
-    std::str::from_utf8(bytes).map(|s| s.to_string()).map_err(|_| EINVAL)
+    std::str::from_utf8(bytes)
+        .map(|s| s.to_string())
+        .map_err(|_| EINVAL)
 }
 
 fn write_i32(mem: &mut [u8], ptr: u32, val: i32) -> i32 {
@@ -87,52 +89,279 @@ fn write_i32(mem: &mut [u8], ptr: u32, val: i32) -> i32 {
 /// plus `env` aliases for Rust defaults).
 pub fn add_host_imports(linker: &mut wasmtime::Linker<crate::p1::P1State>) -> anyhow::Result<()> {
     for module in ["wawona_socket", "env"] {
-        linker.func_wrap(module, "wawona_socket_socket", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, domain: i32, ty: i32, fd_out: i32| -> i32 {
-            socket_socket(&mut caller, domain, ty, fd_out as u32)
-        })?;
-        linker.func_wrap(module, "wawona_socket_connect_host", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, host: i32, host_len: i32, port: i32| -> i32 {
-            socket_connect_host(&mut caller, fd, host as u32, host_len as u32, port)
-        })?;
-        linker.func_wrap(module, "wawona_socket_send", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, buf: i32, len: i32, sent_out: i32| -> i32 {
-            socket_send(&mut caller, fd, buf as u32, len as u32, sent_out as u32)
-        })?;
-        linker.func_wrap(module, "wawona_socket_recv", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, buf: i32, len: i32, recv_out: i32| -> i32 {
-            socket_recv(&mut caller, fd, buf as u32, len as u32, recv_out as u32)
-        })?;
-        linker.func_wrap(module, "wawona_socket_close", |_caller: wasmtime::Caller<'_, crate::p1::P1State>, fd: i32| -> i32 {
-            socket_close(fd)
-        })?;
-        linker.func_wrap(module, "wawona_socket_tls_connect_host", |_c: wasmtime::Caller<'_, crate::p1::P1State>, _fd: i32, _h: i32, _hl: i32, _p: i32| -> i32 {
-            ENOSYS
-        })?;
-        linker.func_wrap(module, "wawona_wayland_connect", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, fd_out: i32| -> i32 {
-            wayland_connect(&mut caller, fd_out as u32)
-        })?;
-        linker.func_wrap(module, "wawona_wayland_shm_create", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, size: i32, fd_out: i32| -> i32 {
-            wayland_shm_create(&mut caller, size, fd_out as u32)
-        })?;
-        linker.func_wrap(module, "wawona_wayland_shm_send", |_c: wasmtime::Caller<'_, crate::p1::P1State>, wl_fd: i32, shm_fd: i32| -> i32 {
-            wayland_shm_send(wl_fd, shm_fd)
-        })?;
-        linker.func_wrap(module, "wawona_wayland_shm_write", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, shm_fd: i32, offset: i32, buf: i32, len: i32| -> i32 {
-            wayland_shm_write(&mut caller, shm_fd, offset, buf as u32, len as u32)
-        })?;
-        linker.func_wrap(module, "wawona_wayland_sendmsg", |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, wl_fd: i32, buf: i32, len: i32, scm_fd: i32| -> i32 {
-            wayland_sendmsg(&mut caller, wl_fd, buf as u32, len as u32, scm_fd)
-        })?;
+        linker.func_wrap(
+            module,
+            "wawona_socket_socket",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>,
+             domain: i32,
+             ty: i32,
+             fd_out: i32|
+             -> i32 { socket_socket(&mut caller, domain, ty, fd_out as u32) },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_socket_connect_host",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>,
+             fd: i32,
+             host: i32,
+             host_len: i32,
+             port: i32|
+             -> i32 {
+                socket_connect_host(&mut caller, fd, host as u32, host_len as u32, port)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_socket_send",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>,
+             fd: i32,
+             buf: i32,
+             len: i32,
+             sent_out: i32|
+             -> i32 {
+                socket_send(&mut caller, fd, buf as u32, len as u32, sent_out as u32)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_socket_recv",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>,
+             fd: i32,
+             buf: i32,
+             len: i32,
+             recv_out: i32|
+             -> i32 {
+                socket_recv(&mut caller, fd, buf as u32, len as u32, recv_out as u32)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_socket_close",
+            |_caller: wasmtime::Caller<'_, crate::p1::P1State>, fd: i32| -> i32 {
+                socket_close(fd)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_socket_tls_connect_host",
+            |_c: wasmtime::Caller<'_, crate::p1::P1State>,
+             _fd: i32,
+             _h: i32,
+             _hl: i32,
+             _p: i32|
+             -> i32 { ENOSYS },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_wayland_connect",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, fd_out: i32| -> i32 {
+                wayland_connect(&mut caller, fd_out as u32)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_wayland_shm_create",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, size: i32, fd_out: i32| -> i32 {
+                wayland_shm_create(&mut caller, size, fd_out as u32)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_wayland_shm_send",
+            |_c: wasmtime::Caller<'_, crate::p1::P1State>, wl_fd: i32, shm_fd: i32| -> i32 {
+                wayland_shm_send(wl_fd, shm_fd)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_wayland_shm_write",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>,
+             shm_fd: i32,
+             offset: i32,
+             buf: i32,
+             len: i32|
+             -> i32 {
+                wayland_shm_write(&mut caller, shm_fd, offset, buf as u32, len as u32)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_wayland_sendmsg",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>,
+             wl_fd: i32,
+             buf: i32,
+             len: i32,
+             scm_fd: i32|
+             -> i32 {
+                wayland_sendmsg(&mut caller, wl_fd, buf as u32, len as u32, scm_fd)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_vk_probe",
+            |_c: wasmtime::Caller<'_, crate::p1::P1State>| -> i32 { crate::vk_board::probe() },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_vk_upload",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, desc: i32| -> i32 {
+                vk_upload(&mut caller, desc as u32)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_vk_frame",
+            |mut caller: wasmtime::Caller<'_, crate::p1::P1State>, desc: i32| -> i32 {
+                vk_frame(&mut caller, desc as u32)
+            },
+        )?;
     }
     for module in ["wawona_terminal", "env"] {
-        linker.func_wrap(module, "wawona_terminal_set_raw", |_c: wasmtime::Caller<'_, crate::p1::P1State>, enabled: i32| -> i32 {
-            terminal_set_raw(enabled)
-        })?;
-        linker.func_wrap(module, "wawona_terminal_is_tty", |_c: wasmtime::Caller<'_, crate::p1::P1State>, fd: i32| -> i32 {
-            if fd >= 0 && fd <= 2 { 1 } else { 0 }
-        })?;
+        linker.func_wrap(
+            module,
+            "wawona_terminal_set_raw",
+            |_c: wasmtime::Caller<'_, crate::p1::P1State>, enabled: i32| -> i32 {
+                terminal_set_raw(enabled)
+            },
+        )?;
+        linker.func_wrap(
+            module,
+            "wawona_terminal_is_tty",
+            |_c: wasmtime::Caller<'_, crate::p1::P1State>, fd: i32| -> i32 {
+                if fd >= 0 && fd <= 2 {
+                    1
+                } else {
+                    0
+                }
+            },
+        )?;
     }
     Ok(())
 }
 
-fn memory_mut<'a>(caller: &'a mut wasmtime::Caller<'_, crate::p1::P1State>) -> Result<&'a mut [u8], i32> {
+fn guest_bytes(mem: &[u8], ptr: u32, len: u32) -> Result<Vec<u8>, i32> {
+    if len > 32 * 1024 * 1024 {
+        return Err(EINVAL);
+    }
+    let start = ptr as usize;
+    let end = start.checked_add(len as usize).ok_or(EINVAL)?;
+    mem.get(start..end).map(|b| b.to_vec()).ok_or(EINVAL)
+}
+
+fn u32s(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+/// Guest descriptor, 8 little-endian u32s: spirv ptr/len, verts ptr/len,
+/// blob ptr/len, table ptr/count. The table is (offset, len) pairs into the blob.
+fn vk_upload(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, desc: u32) -> i32 {
+    let mem = match memory_mut(caller) {
+        Ok(m) => m,
+        Err(e) => return e,
+    };
+    let words = match guest_bytes(mem, desc, 32) {
+        Ok(b) => u32s(&b),
+        Err(e) => return e,
+    };
+    if words[1] > 1 << 20 || words[3] > 16 << 20 || words[5] > 32 << 20 || words[7] > 32 {
+        return EINVAL;
+    }
+    let spirv = match guest_bytes(mem, words[0], words[1]) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let verts = match guest_bytes(mem, words[2], words[3]) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let blobs = match guest_bytes(mem, words[4], words[5]) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let table = match guest_bytes(mem, words[6], words[7].saturating_mul(8)) {
+        Ok(b) => u32s(&b),
+        Err(e) => return e,
+    };
+    let mut layers = Vec::with_capacity(words[7] as usize);
+    for pair in table.chunks_exact(2) {
+        let start = pair[0] as usize;
+        let end = start
+            .checked_add(pair[1] as usize)
+            .ok_or(EINVAL)
+            .unwrap_or(usize::MAX);
+        if end > blobs.len() {
+            return EINVAL;
+        }
+        match decode_layer(&blobs[start..end]) {
+            Ok(px) => layers.push(px),
+            Err(e) => return e,
+        }
+    }
+    crate::vk_board::upload(&spirv, &verts, &layers)
+}
+
+fn decode_layer(bytes: &[u8]) -> Result<Vec<u8>, i32> {
+    if bytes.len() == 256 * 256 * 4 {
+        return Ok(bytes.to_vec());
+    }
+    let img = image::load_from_memory(bytes).map_err(|_| EINVAL)?;
+    let img = img.resize_exact(256, 256, image::imageops::FilterType::Triangle);
+    Ok(img.into_rgba8().into_raw())
+}
+
+/// Guest descriptor, 10 little-endian u32s: instances, draws, uniform, width,
+/// height, output pointer and byte length. Output is tightly packed RGBA.
+fn vk_frame(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, desc: u32) -> i32 {
+    let mem = match memory_mut(caller) {
+        Ok(m) => m,
+        Err(e) => return e,
+    };
+    let words = match guest_bytes(mem, desc, 40) {
+        Ok(b) => u32s(&b),
+        Err(e) => return e,
+    };
+    if words[1] > 4096 * 112 || words[3] > 2048 * 20 || words[5] > 256 {
+        return EINVAL;
+    }
+    let instances = match guest_bytes(mem, words[0], words[1]) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let draws = match guest_bytes(mem, words[2], words[3]) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let uniform = match guest_bytes(mem, words[4], words[5]) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let width = words[6];
+    let height = words[7];
+    let out_ptr = words[8] as usize;
+    let out_len = words[9] as usize;
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    if pixels.len() > out_len
+        || out_ptr
+            .checked_add(pixels.len())
+            .map(|e| e > mem.len())
+            .unwrap_or(true)
+    {
+        return EINVAL;
+    }
+    let rc = crate::vk_board::frame(&instances, &draws, &uniform, width, height, &mut pixels);
+    if rc != 0 {
+        return rc;
+    }
+    mem[out_ptr..out_ptr + pixels.len()].copy_from_slice(&pixels);
+    0
+}
+
+fn memory_mut<'a>(
+    caller: &'a mut wasmtime::Caller<'_, crate::p1::P1State>,
+) -> Result<&'a mut [u8], i32> {
     let mem = caller
         .get_export("memory")
         .and_then(|e| e.into_memory())
@@ -140,7 +369,12 @@ fn memory_mut<'a>(caller: &'a mut wasmtime::Caller<'_, crate::p1::P1State>) -> R
     Ok(mem.data_mut(caller))
 }
 
-fn socket_socket(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, domain: i32, ty: i32, fd_out: u32) -> i32 {
+fn socket_socket(
+    caller: &mut wasmtime::Caller<'_, crate::p1::P1State>,
+    domain: i32,
+    ty: i32,
+    fd_out: u32,
+) -> i32 {
     // AF_INET=2, AF_INET6=30, AF_UNIX=1; SOCK_STREAM=1, SOCK_DGRAM=2
     let mut table = socks().lock().unwrap_or_else(|e| e.into_inner());
     let sock = match (domain, ty) {
@@ -181,7 +415,13 @@ fn socket_socket(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, domain: 
     }
 }
 
-fn socket_connect_host(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, host: u32, host_len: u32, port: i32) -> i32 {
+fn socket_connect_host(
+    caller: &mut wasmtime::Caller<'_, crate::p1::P1State>,
+    fd: i32,
+    host: u32,
+    host_len: u32,
+    port: i32,
+) -> i32 {
     let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return EIO,
@@ -203,7 +443,13 @@ fn socket_connect_host(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd
     }
 }
 
-fn socket_send(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, buf: u32, len: u32, sent_out: u32) -> i32 {
+fn socket_send(
+    caller: &mut wasmtime::Caller<'_, crate::p1::P1State>,
+    fd: i32,
+    buf: u32,
+    len: u32,
+    sent_out: u32,
+) -> i32 {
     let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
         Some(m) => m,
         None => return EIO,
@@ -258,7 +504,13 @@ fn socket_raw_fd(fd: i32) -> Result<RawFd, i32> {
     }
 }
 
-fn socket_recv(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, buf: u32, len: u32, recv_out: u32) -> i32 {
+fn socket_recv(
+    caller: &mut wasmtime::Caller<'_, crate::p1::P1State>,
+    fd: i32,
+    buf: u32,
+    len: u32,
+    recv_out: u32,
+) -> i32 {
     if crate::interrupt::is_set() {
         return EIO;
     }
@@ -335,7 +587,11 @@ fn wayland_connect(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd_out
     }
 }
 
-fn wayland_shm_create(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, size: i32, fd_out: u32) -> i32 {
+fn wayland_shm_create(
+    caller: &mut wasmtime::Caller<'_, crate::p1::P1State>,
+    size: i32,
+    fd_out: u32,
+) -> i32 {
     if size <= 0 {
         return EINVAL;
     }
@@ -369,9 +625,8 @@ fn open_anon_shm(size: u64) -> std::io::Result<std::fs::File> {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let cname = std::ffi::CString::new(name).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "shm name")
-        })?;
+        let cname = std::ffi::CString::new(name)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "shm name"))?;
         let raw = unsafe {
             libc::shm_open(
                 cname.as_ptr(),

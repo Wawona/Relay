@@ -37,6 +37,8 @@ cranelift-native = ["wasmtime/cranelift"]
 
 [dependencies]
 anyhow = "1"
+ash = "0.38"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 # cli + registry: Mode A HTTPS client for repo.wawona.io/wasm (iOS in-process
 # wpm_main and macOS staticlib both need search/install by name).
@@ -51,6 +53,9 @@ wasmtime = { version = "33", default-features = false, features = [
 wasmtime-wasi = { version = "33", default-features = false, features = [
   "preview1",
 ] }
+
+[dev-dependencies]
+naga = { version = "25", default-features = false, features = ["wgsl-in", "spv-out"] }
 
 [profile.release]
 opt-level = 2
