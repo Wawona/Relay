@@ -20,6 +20,10 @@ const ENOSYS: i32 = 52;
 const EINVAL: i32 = 28;
 const EIO: i32 = 29;
 const MAX_DIM: u32 = 2048;
+/// Guest layer index is a cell in this grid. Matches `atlas_uv` in the wasm shader.
+const ATLAS_COLS: u32 = 8;
+const ATLAS_ROWS: u32 = 4;
+const ATLAS_CELL: u32 = 256;
 const DRAW_STRIDE: usize = 20;
 
 #[allow(dead_code)]
@@ -77,6 +81,8 @@ struct Targets {
     fb_main: vk::Framebuffer,
     read_buf: vk::Buffer,
     read_mem: vk::DeviceMemory,
+    /// Bytes from one row to the next in `read_mem`. Metal wants 256-byte rows.
+    read_stride: usize,
 }
 
 struct Image {
@@ -138,7 +144,7 @@ pub fn upload(spirv: &[u8], verts: &[u8], layers: &[Vec<u8>]) -> i32 {
     match gpu.upload(spirv, verts, layers) {
         Ok(()) => 0,
         Err(err) => {
-            eprintln!("wawona-vk upload: {err}");
+            remember("upload", &err);
             EIO
         }
     }
@@ -169,9 +175,38 @@ pub fn frame(
     match gpu.draw(instances, draws, uniform, width, height, &mut out[..need]) {
         Ok(()) => 0,
         Err(err) => {
-            eprintln!("wawona-vk frame: {err}");
+            remember("frame", &err);
             EIO
         }
+    }
+}
+
+/// The guest shell only sees the errno. The simulator process often has no
+/// `HOME`, so write every temp path and `syslog` until one sticks.
+fn remember(kind: &str, err: &str) {
+    eprintln!("wawona-vk {kind}: {err}");
+    let line = format!("{kind}: {err}\n");
+    let mut paths = vec![
+        std::env::temp_dir().join("wawona-vk-last.txt"),
+        std::path::PathBuf::from("/tmp/wawona-vk-last.txt"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        paths.push(home.join("Documents/wawona-vk-last.txt"));
+        paths.push(home.join("tmp/wawona-vk-last.txt"));
+        paths.push(home.join("wawona-vk-last.txt"));
+    }
+    for path in &paths {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(path, &line).is_ok() {
+            break;
+        }
+    }
+    let note = CString::new(format!("wawona-vk {kind}: {err}")).unwrap_or_else(|_| c"wawona-vk".to_owned());
+    unsafe {
+        libc::syslog(3, c"%s".as_ptr(), note.as_ptr());
     }
 }
 
@@ -275,20 +310,10 @@ impl Gpu {
             .queue_family_index(queue_family);
         let cmd_pool =
             unsafe { device.create_command_pool(&pool_info, None) }.map_err(|e| e.to_string())?;
-        let props = unsafe { instance.get_physical_device_properties(physical) };
-        let samples = if props
-            .limits
-            .framebuffer_color_sample_counts
-            .contains(vk::SampleCountFlags::TYPE_4)
-            && props
-                .limits
-                .framebuffer_depth_sample_counts
-                .contains(vk::SampleCountFlags::TYPE_4)
-        {
-            vk::SampleCountFlags::TYPE_4
-        } else {
-            vk::SampleCountFlags::TYPE_1
-        };
+        // Offscreen readback. 4x MSAA plus a transient color image fails
+        // `vkCreateImage` / submit on the iOS simulator MoltenVK. The SHM
+        // blit does not need multisample.
+        let samples = vk::SampleCountFlags::TYPE_1;
         let mem = unsafe { instance.get_physical_device_memory_properties(physical) };
         Ok(Self {
             entry,
@@ -331,15 +356,18 @@ impl Gpu {
         if self.pipeline.is_none() || self.scene.is_none() {
             return Err("upload before frame".into());
         }
-        self.ensure_targets(width, height)?;
+        self.ensure_targets(width, height)
+            .map_err(|e| format!("targets {width}x{height}: {e}"))?;
         self.write_bytes(
             self.scene.as_ref().unwrap().inst_buf,
             self.scene.as_ref().unwrap().inst_mem,
             instances,
-        )?;
-        self.write_uniform(uniform)?;
+        )
+        .map_err(|e| format!("instances: {e}"))?;
+        self.write_uniform(uniform).map_err(|e| format!("uniform: {e}"))?;
         let parsed = parse_draws(draws)?;
         self.record_and_read(&parsed, width, height, out)
+            .map_err(|e| format!("record: {e}"))
     }
 }
 
@@ -432,11 +460,30 @@ fn image(
         .initial_layout(vk::ImageLayout::UNDEFINED);
     let img = unsafe { device.create_image(&info, None) }.map_err(|e| e.to_string())?;
     let req = unsafe { device.get_image_memory_requirements(img) };
-    let ty = memory_type(
-        mem,
-        req.memory_type_bits,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )
+    // iOS simulator Metal will not blit a private (DEVICE_LOCAL) color
+    // attachment into a buffer. Shared memory is the readback path.
+    let host_visible = usage.contains(vk::ImageUsageFlags::TRANSFER_SRC)
+        && usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT);
+    let ty = if host_visible {
+        memory_type(
+            mem,
+            req.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .or_else(|_| {
+            memory_type(
+                mem,
+                req.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+        })
+    } else {
+        memory_type(
+            mem,
+            req.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+    }
     .or_else(|_| memory_type(mem, req.memory_type_bits, vk::MemoryPropertyFlags::empty()))?;
     let alloc = vk::MemoryAllocateInfo::default()
         .allocation_size(req.size)
@@ -532,7 +579,7 @@ impl Gpu {
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::RGBA);
@@ -629,9 +676,9 @@ impl Gpu {
         let (tex_image, tex_mem) = image(
             &self.device,
             &self.mem,
-            256,
-            256,
-            layers.len() as u32,
+            ATLAS_CELL * ATLAS_COLS,
+            ATLAS_CELL * ATLAS_ROWS,
+            1,
             vk::Format::R8G8B8A8_SRGB,
             vk::SampleCountFlags::TYPE_1,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
@@ -641,8 +688,8 @@ impl Gpu {
             &self.device,
             tex_image,
             vk::Format::R8G8B8A8_SRGB,
-            layers.len() as u32,
-            vk::ImageViewType::TYPE_2D_ARRAY,
+            1,
+            vk::ImageViewType::TYPE_2D,
             vk::ImageAspectFlags::COLOR,
         )?;
         let (dummy_image, dummy_mem) = image(
@@ -754,10 +801,12 @@ impl Gpu {
                 vk::PipelineStageFlags::TRANSFER,
                 vk::AccessFlags::empty(),
                 vk::AccessFlags::TRANSFER_WRITE,
-                layers.len() as u32,
+                1,
             );
             let mut regions = Vec::new();
             for (i, _) in layers.iter().enumerate() {
+                let col = (i as u32) % ATLAS_COLS;
+                let row = (i as u32) / ATLAS_COLS;
                 regions.push(vk::BufferImageCopy {
                     buffer_offset: (i * 256 * 256 * 4) as u64,
                     buffer_row_length: 0,
@@ -765,13 +814,17 @@ impl Gpu {
                     image_subresource: vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: 0,
-                        base_array_layer: i as u32,
+                        base_array_layer: 0,
                         layer_count: 1,
                     },
-                    image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+                    image_offset: vk::Offset3D {
+                        x: (col * ATLAS_CELL) as i32,
+                        y: (row * ATLAS_CELL) as i32,
+                        z: 0,
+                    },
                     image_extent: vk::Extent3D {
-                        width: 256,
-                        height: 256,
+                        width: ATLAS_CELL,
+                        height: ATLAS_CELL,
                         depth: 1,
                     },
                 });
@@ -793,7 +846,7 @@ impl Gpu {
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
                 vk::AccessFlags::TRANSFER_WRITE,
                 vk::AccessFlags::SHADER_READ,
-                layers.len() as u32,
+                1,
             );
         }
         self.submit(cmd)?;
@@ -844,7 +897,9 @@ impl Gpu {
             1,
             vk::Format::R8G8B8A8_UNORM,
             vk::SampleCountFlags::TYPE_1,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC,
         )?;
         let refl_v = view(
             &self.device,
@@ -862,7 +917,7 @@ impl Gpu {
             1,
             vk::Format::R8G8B8A8_UNORM,
             samples,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
         )?;
         let color_v = view(
             &self.device,
@@ -932,7 +987,9 @@ impl Gpu {
                 )?,
             )
         };
-        let nbytes = width as u64 * height as u64 * 4;
+        let row_bytes = (width as usize) * 4;
+        let read_stride = row_bytes.div_ceil(256) * 256;
+        let nbytes = (read_stride * height as usize) as u64;
         let (read_buf, read_mem) = buffer(
             &self.device,
             &self.mem,
@@ -967,6 +1024,7 @@ impl Gpu {
             fb_main,
             read_buf,
             read_mem,
+            read_stride,
         });
         Ok(())
     }
@@ -1111,7 +1169,16 @@ impl Gpu {
                     if d.v0.saturating_add(d.vc) > scene.vert_count {
                         continue;
                     }
-                    self.device.cmd_draw(cmd, d.vc, d.ic, d.v0, d.i0);
+                    // iOS simulator MoltenVK rejects vkCmdDraw firstInstance != 0
+                    // (drawVertexBaseInstance is absent). The instance rate starts
+                    // at the bound buffer offset instead. 112 is 16-byte aligned.
+                    self.device.cmd_bind_vertex_buffers(
+                        cmd,
+                        1,
+                        &[scene.inst_buf],
+                        &[d.i0 as u64 * 112],
+                    );
+                    self.device.cmd_draw(cmd, d.vc, d.ic, d.v0, 0);
                 }
             };
             begin_pass(targets.fb_refl, [0.0, 0.0, 0.0, 0.0]);
@@ -1137,8 +1204,8 @@ impl Gpu {
             self.device.cmd_end_render_pass(cmd);
             let copy = vk::BufferImageCopy {
                 buffer_offset: 0,
-                buffer_row_length: 0,
-                buffer_image_height: 0,
+                buffer_row_length: (targets.read_stride / 4) as u32,
+                buffer_image_height: height,
                 image_subresource: vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: 0,
@@ -1160,8 +1227,116 @@ impl Gpu {
                 &[copy],
             );
         }
-        self.submit(cmd)?;
-        read_mem(&self.device, self.targets.as_ref().unwrap().read_mem, out)
+        if let Err(e) = self.submit(cmd) {
+            let why = self.explain_record(draws, width, height);
+            return Err(format!("{e} | {why}"));
+        }
+        let stride = self.targets.as_ref().unwrap().read_stride;
+        read_mem_rows(
+            &self.device,
+            self.targets.as_ref().unwrap().read_mem,
+            width,
+            height,
+            stride,
+            out,
+        )
+    }
+
+    /// Which recorded command the simulator rejects. Runs only after a failed frame.
+    fn explain_record(&self, draws: &[Draw], width: u32, height: u32) -> String {
+        let max_i0 = draws.iter().map(|d| d.i0).max().unwrap_or(0);
+        let mut parts = vec![format!("base0 max_i0={max_i0} n={}", draws.len())];
+        let end = |cmd| match unsafe { self.device.end_command_buffer(cmd) } {
+            Ok(()) => "ok".to_string(),
+            Err(e) => e.to_string(),
+        };
+        let pipe = self.pipeline.as_ref().unwrap();
+        let scene = self.scene.as_ref().unwrap();
+        let targets = self.targets.as_ref().unwrap();
+        let begin_main = |cmd| {
+            let clear_color = vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            };
+            let clear_depth = vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            };
+            let clears = [clear_color, clear_depth];
+            let info = vk::RenderPassBeginInfo::default()
+                .render_pass(pipe.render_pass)
+                .framebuffer(targets.fb_main)
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D { width, height },
+                })
+                .clear_values(&clears);
+            unsafe {
+                self.device
+                    .cmd_begin_render_pass(cmd, &info, vk::SubpassContents::INLINE);
+            }
+        };
+        if let Ok(cmd) = self.one_shot() {
+            begin_main(cmd);
+            unsafe { self.device.cmd_end_render_pass(cmd) };
+            parts.push(format!("pass:{}", end(cmd)));
+            unsafe { self.device.free_command_buffers(self.cmd_pool, &[cmd]) };
+        }
+        let first = draws.iter().find(|d| d.vc > 0 && d.ic > 0);
+        if let (Ok(cmd), Some(d)) = (self.one_shot(), first) {
+            begin_main(cmd);
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipe.pipeline,
+                );
+                self.device.cmd_bind_vertex_buffers(
+                    cmd,
+                    0,
+                    &[scene.vert_buf, scene.inst_buf],
+                    &[0, d.i0 as u64 * 112],
+                );
+                self.device.cmd_draw(cmd, d.vc, d.ic, d.v0, 0);
+                self.device.cmd_end_render_pass(cmd);
+            }
+            parts.push(format!("draw:{}", end(cmd)));
+            unsafe { self.device.free_command_buffers(self.cmd_pool, &[cmd]) };
+        }
+        if let Ok(cmd) = self.one_shot() {
+            let copy = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D::default(),
+                image_extent: vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            };
+            unsafe {
+                self.device.cmd_copy_image_to_buffer(
+                    cmd,
+                    targets.resolve.image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    targets.read_buf,
+                    &[copy],
+                );
+            }
+            parts.push(format!("copy:{}", end(cmd)));
+            unsafe { self.device.free_command_buffers(self.cmd_pool, &[cmd]) };
+        }
+        parts.join(" ")
     }
 
     fn one_shot(&self) -> Result<vk::CommandBuffer, String> {
@@ -1178,14 +1353,14 @@ impl Gpu {
     }
 
     fn submit(&self, cmd: vk::CommandBuffer) -> Result<(), String> {
-        unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| e.to_string())?;
+        unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| format!("end_command_buffer: {e}"))?;
         let info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
         unsafe {
             self.device
                 .queue_submit(self.queue, &[info], vk::Fence::null())
         }
-        .map_err(|e| e.to_string())?;
-        unsafe { self.device.queue_wait_idle(self.queue) }.map_err(|e| e.to_string())?;
+        .map_err(|e| format!("queue_submit: {e}"))?;
+        unsafe { self.device.queue_wait_idle(self.queue) }.map_err(|e| format!("queue_wait_idle: {e}"))?;
         unsafe { self.device.free_command_buffers(self.cmd_pool, &[cmd]) };
         Ok(())
     }
@@ -1404,26 +1579,37 @@ fn render_pass(
     if let Some(r) = resolve_ref.as_ref() {
         sub = sub.resolve_attachments(std::slice::from_ref(r));
     }
-    let dep = vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        )
-        .dst_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        );
+    let deps = [
+        vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+        // The copy to the host buffer runs in this command buffer after the
+        // pass. Without this edge MoltenVK on iOS fails the submit.
+        vk::SubpassDependency::default()
+            .src_subpass(0)
+            .dst_subpass(vk::SUBPASS_EXTERNAL)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ),
+    ];
     let info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
         .subpasses(std::slice::from_ref(&sub))
-        .dependencies(std::slice::from_ref(&dep));
+        .dependencies(&deps);
     unsafe { device.create_render_pass(&info, None) }.map_err(|e| e.to_string())
 }
 
@@ -1673,12 +1859,27 @@ struct Output { @builtin(position) clip: vec4<f32>, @location(0) tint: vec4<f32>
     }
 }
 
-fn read_mem(device: &ash::Device, mem: vk::DeviceMemory, out: &mut [u8]) -> Result<(), String> {
+fn read_mem_rows(
+    device: &ash::Device,
+    mem: vk::DeviceMemory,
+    width: u32,
+    height: u32,
+    stride: usize,
+    out: &mut [u8],
+) -> Result<(), String> {
+    let tight = width as usize * 4;
+    let bytes = stride * height as usize;
     unsafe {
         let ptr = device
-            .map_memory(mem, 0, out.len() as u64, vk::MemoryMapFlags::empty())
-            .map_err(|e| e.to_string())? as *const u8;
-        std::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), out.len());
+            .map_memory(mem, 0, bytes as u64, vk::MemoryMapFlags::empty())
+            .map_err(|e| format!("map_memory: {e}"))? as *const u8;
+        for y in 0..height as usize {
+            std::ptr::copy_nonoverlapping(
+                ptr.add(y * stride),
+                out.as_mut_ptr().add(y * tight),
+                tight,
+            );
+        }
         device.unmap_memory(mem);
     }
     Ok(())
