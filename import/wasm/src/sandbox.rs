@@ -17,13 +17,27 @@ pub fn sandbox_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Wasmtime fuel for one guest run. Override with `WAWONA_WASM_FUEL` for benches.
+/// Instructions for one guest stretch.
+///
+/// Fuel stays on so a pure wasm spin cannot hang the in-process shell.
+/// Wasmtime does not burn fuel while a host call blocks, and it does not
+/// refill when that call returns. A Wayland client spends one budget on
+/// everything between `socket_recv` returns: event dispatch and the next
+/// SHM frame. `socket_recv` refills this after a read that returns bytes.
+///
+/// `chess-wawona` logged `toplevel configure 0x0` (normal first xdg
+/// configure; the client ignores non-positive sizes and paints 640x800)
+/// then trapped `all fuel consumed by WebAssembly` inside `_start`, before
+/// `committed`. 25_000_000 died in that first frame. One burst has to cover
+/// a frame and a depth-3 search, which is pure wasm between host calls.
+///
+/// Override with `WAWONA_WASM_FUEL` for benches.
 pub fn fuel_budget() -> u64 {
     std::env::var("WAWONA_WASM_FUEL")
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(25_000_000)
+        .unwrap_or(2_000_000_000)
 }
 
 /// Canonicalize `guest` against `root`. Deny NUL and path escape.
@@ -89,6 +103,21 @@ mod tests {
         let err = resolve_in_sandbox(&root, "../outside.txt").unwrap_err();
         assert!(err.contains("EACCES"), "{err}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn default_fuel_covers_a_wayland_frame() {
+        let prev = std::env::var("WAWONA_WASM_FUEL").ok();
+        std::env::remove_var("WAWONA_WASM_FUEL");
+        let budget = fuel_budget();
+        match prev {
+            Some(value) => std::env::set_var("WAWONA_WASM_FUEL", value),
+            None => std::env::remove_var("WAWONA_WASM_FUEL"),
+        }
+        assert!(
+            budget >= 2_000_000_000,
+            "a Wayland SHM frame plus a short search must fit in one burst, got {budget}"
+        );
     }
 
     #[test]

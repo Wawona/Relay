@@ -111,6 +111,8 @@ pub fn run(engine: &Engine, path: &std::path::Path, args: &[String]) -> Result<i
             wasi: builder.build_p1(),
         },
     );
+    // Instantiation spends fuel. Arm again immediately before `_start` so
+    // the first Wayland frame is not paying for module load.
     store
         .set_fuel(crate::sandbox::fuel_budget())
         .ok();
@@ -119,6 +121,9 @@ pub fn run(engine: &Engine, path: &std::path::Path, args: &[String]) -> Result<i
     let instance = linker
         .instantiate(&mut store, &module)
         .context("instantiate P1")?;
+    store
+        .set_fuel(crate::sandbox::fuel_budget())
+        .ok();
     let start = instance
         .get_typed_func::<(), ()>(&mut store, "_start")
         .context("missing _start")?;

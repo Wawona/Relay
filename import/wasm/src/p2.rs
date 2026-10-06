@@ -67,6 +67,9 @@ pub fn run(engine: &Engine, path: &std::path::Path, args: &[String]) -> Result<i
         &linker,
     )
     .context("instantiate wasi:cli/command")?;
+    store
+        .set_fuel(crate::sandbox::fuel_budget())
+        .ok();
     let result = match cmd.wasi_cli_run().call_run(&mut store) {
         Ok(Ok(())) => Ok(0),
         Ok(Err(())) => Ok(1),

@@ -8,7 +8,7 @@
 //!   cargo run -p wawona-wasm --bin wasm_bench --release -- /path/to/module.wasm [iters]
 //!
 //! Env:
-//!   WAWONA_WASM_FUEL   fuel budget (default 25_000_000)
+//!   WAWONA_WASM_FUEL   fuel budget (default 2_000_000_000)
 
 use std::env;
 use std::path::PathBuf;

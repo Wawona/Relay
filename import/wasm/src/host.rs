@@ -281,13 +281,21 @@ fn socket_recv(caller: &mut wasmtime::Caller<'_, crate::p1::P1State>, fd: i32, b
         Some(m) => m,
         None => return EIO,
     };
-    let data = mem.data_mut(caller);
-    let start = buf as usize;
-    if start + n > data.len() {
-        return EINVAL;
+    let rc = {
+        let data = mem.data_mut(&mut *caller);
+        let start = buf as usize;
+        if start + n > data.len() {
+            return EINVAL;
+        }
+        data[start..start + n].copy_from_slice(&tmp[..n]);
+        write_i32(data, recv_out, n as i32)
+    };
+    // Next guest stretch (dispatch, SHM paint, a short search) gets a full
+    // budget. EOF does not refill, so a closed socket still traps.
+    if n > 0 {
+        let _ = caller.set_fuel(crate::sandbox::fuel_budget());
     }
-    data[start..start + n].copy_from_slice(&tmp[..n]);
-    write_i32(data, recv_out, n as i32)
+    rc
 }
 
 fn socket_close(fd: i32) -> i32 {
