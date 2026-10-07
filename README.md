@@ -122,6 +122,18 @@ See Wawona `docs/relay-page-geometry.md`.
 - Windows / macOS / BSD / "any ISO" guests
 - AVF in Play. Termux debs as a Relay backend
 
+## WASI / Wayland developer docs
+
+Canonical on **wawona.io** (not this repo):
+
+| Doc | URL |
+|-----|-----|
+| Host ABI | https://wawona.io/docs/contributor/wasm-host-abi/ |
+| Wayland wasm guide | https://wawona.io/docs/contributor/wayland-wasm/ |
+| Examples | [`import/wasm/examples/`](import/wasm/examples/) |
+
+Stubs under [`docs/`](docs/) point at those pages.
+
 ## Crates
 
 ```text

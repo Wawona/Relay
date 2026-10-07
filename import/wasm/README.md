@@ -29,6 +29,11 @@ Host extras (P1 import module `wawona_socket` / `wawona_terminal`):
   (SCM_RIGHTS into the existing compositor)
 - TTY raw/cooked bit
 
+**Canonical docs (wawona.io):**
+
+- [Host ABI reference](https://wawona.io/docs/contributor/wasm-host-abi/)
+- [Wayland wasm developer guide](https://wawona.io/docs/contributor/wayland-wasm/)
+
 P2 guests use `wasi:cli` / `filesystem` / `sockets` / `clocks` / `random`.
 `wasi:http` is not linked yet (size); use sockets or a native port.
 
