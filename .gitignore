@@ -9,3 +9,4 @@ relay-vm-state*
 /fuzz/artifacts
 /fuzz/corpus
 /fuzz/target
+verification/loom-lifecycle/target/

@@ -3,9 +3,7 @@
 use anyhow::{Context, Result};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::p2::{
-    add_to_linker_sync, IoView, WasiCtx, WasiCtxBuilder, WasiView,
-};
+use wasmtime_wasi::p2::{add_to_linker_sync, IoView, WasiCtx, WasiCtxBuilder, WasiView};
 use wasmtime_wasi::{DirPerms, FilePerms};
 
 use crate::sandbox;
@@ -56,20 +54,13 @@ pub fn run(engine: &Engine, path: &std::path::Path, args: &[String]) -> Result<i
             wasi: builder.build(),
         },
     );
-    store
-        .set_fuel(crate::sandbox::fuel_budget())
-        .ok();
+    store.set_fuel(crate::sandbox::fuel_budget()).ok();
     let _session = crate::interrupt::RunSession::begin(engine, &mut store);
 
-    let cmd = wasmtime_wasi::p2::bindings::sync::Command::instantiate(
-        &mut store,
-        &component,
-        &linker,
-    )
-    .context("instantiate wasi:cli/command")?;
-    store
-        .set_fuel(crate::sandbox::fuel_budget())
-        .ok();
+    let cmd =
+        wasmtime_wasi::p2::bindings::sync::Command::instantiate(&mut store, &component, &linker)
+            .context("instantiate wasi:cli/command")?;
+    store.set_fuel(crate::sandbox::fuel_budget()).ok();
     let result = match cmd.wasi_cli_run().call_run(&mut store) {
         Ok(Ok(())) => Ok(0),
         Ok(Err(())) => Ok(1),

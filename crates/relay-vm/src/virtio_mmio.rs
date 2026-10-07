@@ -190,6 +190,14 @@ impl Transport {
         Ok(self.queue(queue)?.size)
     }
 
+    pub(crate) fn negotiated_features(&self) -> u64 {
+        self.driver_features
+    }
+
+    pub(crate) fn queue_operational(&self, index: u32) -> bool {
+        self.queue(index).is_ok_and(|queue| queue.ready) && self.status & STATUS_DRIVER_OK != 0
+    }
+
     pub(crate) fn pop_available(
         &mut self,
         queue: u32,
@@ -216,6 +224,12 @@ impl Transport {
         let q = self.queue_mut_at(queue)?;
         q.last_available = q.last_available.wrapping_add(1);
         Ok(Some(head))
+    }
+
+    /// Assert the used-buffer interrupt without completing a descriptor.
+    /// Used when RX frames are staged but the guest has not posted buffers.
+    pub(crate) fn force_used_interrupt(&mut self) {
+        self.interrupt_status |= INTERRUPT_USED_BUFFER;
     }
 
     pub(crate) fn complete(

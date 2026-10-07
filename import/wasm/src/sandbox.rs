@@ -80,7 +80,11 @@ pub fn looks_like_component(path: &Path) -> bool {
         return false;
     };
     // WASM component: magic + version 0x0d000100 (component) is common.
-    bytes.len() >= 8 && bytes[0] == 0x00 && bytes[1] == b'a' && bytes[2] == b's' && bytes[3] == b'm'
+    bytes.len() >= 8
+        && bytes[0] == 0x00
+        && bytes[1] == b'a'
+        && bytes[2] == b's'
+        && bytes[3] == b'm'
         && bytes[4] == 0x0d
 }
 

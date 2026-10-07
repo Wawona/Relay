@@ -2408,6 +2408,124 @@ fn scalar_round_to_integral_matches_native_all_controls() {
     both!("frinta", 0x1e26_4001);
     both!("frintx", 0x1e27_4001);
     both!("frinti", 0x1e27_c001);
+    both!("fsqrt", 0x1e21_c001);
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[test]
+fn vector_square_root_matches_native() {
+    macro_rules! check {
+        ($instruction:literal, $word:expr, $double:expr, $wide:expr) => {{
+            let mut cpu = cpu_for($word);
+            let samples: &[u64] = if $double {
+                &[0, 1, 0x3ff0_0000_0000_0000, 0x4000_0000_0000_0000, 0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000, 2, 0x7ff8_0000_0000_0001]
+            } else {
+                &[0, 1, 0x3f80_0000, 0x4000_0000, 0x7f80_0000, 0xff80_0000, 2, 0x7fc0_0001]
+            };
+            for &lane0 in samples {
+                for &lane1 in samples {
+                    let source = u128::from(lane0)
+                        | (u128::from(lane1) << if $double { 64 } else { 32 })
+                        | if $wide && !$double {
+                            (u128::from(lane0) << 64) | (u128::from(lane1) << 96)
+                        } else {
+                            0
+                        };
+                    for control in [0u64, 1, 2, 3, 1 << 2, 1 << 3] {
+                        let fpcr = control << 22;
+                        let mut native = 0u128;
+                        let status: u64;
+                        unsafe {
+                            std::arch::asm!(
+                                "mrs x8, fpcr", "mrs x9, fpsr", "msr fpcr, {control}", "msr fpsr, {initial}",
+                                "ldr q0, [{source}]",
+                                $instruction,
+                                "str q1, [{output}]",
+                                "mrs {status}, fpsr", "msr fpcr, x8", "msr fpsr, x9",
+                                control = in(reg) fpcr, initial = in(reg) 0x0800_0000u64,
+                                source = in(reg) &source, output = in(reg) &mut native,
+                                status = out(reg) status,
+                                out("x8") _, out("x9") _, out("v0") _, out("v1") _,
+                                options(nostack),
+                            );
+                        }
+                        cpu.pc = 0;
+                        cpu.v[0] = source;
+                        cpu.v[1] = u128::MAX;
+                        cpu.sysregs.fpcr = fpcr;
+                        cpu.sysregs.fpsr = 0x0800_0000;
+                        cpu.step().unwrap();
+                        assert_eq!(
+                            (cpu.v[1], cpu.sysregs.fpsr),
+                            (native, status),
+                            "{} source={source:#x} fpcr={fpcr:#x}",
+                            $instruction
+                        );
+                    }
+                }
+            }
+        }};
+    }
+    check!("fsqrt.2s v1, v0", 0x2ea1_f801, false, false);
+    check!("fsqrt.4s v1, v0", 0x6ea1_f801, false, true);
+    check!("fsqrt.2d v1, v0", 0x6ee1_f801, true, true);
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[test]
+fn vector_integer_abs_neg_matches_native() {
+    macro_rules! check {
+        ($instruction:literal, $word:expr) => {{
+            let mut cpu = cpu_for($word);
+            let patterns = [
+                0u128,
+                1,
+                0x80,
+                0x7fff,
+                0x8000,
+                0x7fff_ffff,
+                0x8000_0000,
+                0x7fff_ffff_ffff_ffff,
+                0x8000_0000_0000_0000,
+                u128::MAX,
+                0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+            ];
+            for source in patterns {
+                let mut native = 0u128;
+                unsafe {
+                    std::arch::asm!(
+                        "ldr q0, [{source}]",
+                        $instruction,
+                        "str q1, [{output}]",
+                        source = in(reg) &source,
+                        output = in(reg) &mut native,
+                        out("v0") _,
+                        out("v1") _,
+                        options(nostack),
+                    );
+                }
+                cpu.pc = 0;
+                cpu.v[0] = source;
+                cpu.v[1] = u128::MAX;
+                cpu.step().unwrap();
+                assert_eq!(cpu.v[1], native, "{} source={source:#x}", $instruction);
+            }
+        }};
+    }
+    check!("abs.8b v1, v0", 0x0e20_b801);
+    check!("abs.16b v1, v0", 0x4e20_b801);
+    check!("abs.4h v1, v0", 0x0e60_b801);
+    check!("abs.8h v1, v0", 0x4e60_b801);
+    check!("abs.2s v1, v0", 0x0ea0_b801);
+    check!("abs.4s v1, v0", 0x4ea0_b801);
+    check!("abs.2d v1, v0", 0x4ee0_b801);
+    check!("neg.8b v1, v0", 0x2e20_b801);
+    check!("neg.16b v1, v0", 0x6e20_b801);
+    check!("neg.4h v1, v0", 0x2e60_b801);
+    check!("neg.8h v1, v0", 0x6e60_b801);
+    check!("neg.2s v1, v0", 0x2ea0_b801);
+    check!("neg.4s v1, v0", 0x6ea0_b801);
+    check!("neg.2d v1, v0", 0x6ee0_b801);
 }
 
 #[cfg(all(target_arch = "aarch64", not(miri)))]
@@ -4952,6 +5070,412 @@ fn pairwise_long_matches_native_all_forms_and_aliases() {
     check!("uadalp v0.8h, v1.16b", "uadalp v0.8h, v0.16b", 0x6e206800);
     check!("uadalp v0.4s, v1.8h", "uadalp v0.4s, v0.8h", 0x6e606800);
     check!("uadalp v0.2d, v1.4s", "uadalp v0.2d, v0.4s", 0x6ea06800);
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[test]
+fn three_different_matches_native_neon() {
+    let samples = [
+        0u128,
+        u128::MAX,
+        0x8001_7ffe_7fff_8000_00ff_0102_80ff_7f01,
+        0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+    ];
+    macro_rules! check {
+        ($instruction:literal, $word:expr) => {{
+            for &left in &samples {
+                for &right in &samples {
+                    let prior = left.rotate_left(17) ^ right;
+                    let mut native = 0u128;
+                    // SAFETY: one fixed AdvSIMD mnemonic on initialized locals.
+                    // The host does not execute guest bytes.
+                    unsafe {
+                        std::arch::asm!(
+                            "ldr q0, [{prior}]",
+                            "ldr q1, [{left}]",
+                            "ldr q2, [{right}]",
+                            $instruction,
+                            "str q0, [{output}]",
+                            prior = in(reg) &prior,
+                            left = in(reg) &left,
+                            right = in(reg) &right,
+                            output = in(reg) &mut native,
+                            out("v0") _,
+                            out("v1") _,
+                            out("v2") _,
+                            options(nostack, preserves_flags),
+                        );
+                    }
+                    let mut cpu = cpu_for($word);
+                    cpu.v[0] = prior;
+                    cpu.v[1] = left;
+                    cpu.v[2] = right;
+                    cpu.nzcv = 0xa;
+                    cpu.sysregs.fpsr = 0x0800_0000;
+                    cpu.step().unwrap();
+                    assert_eq!(
+                        cpu.v[0], native,
+                        "{} left={left:#x} right={right:#x} prior={prior:#x}",
+                        $instruction
+                    );
+                    assert_eq!(cpu.v[1], left);
+                    assert_eq!(cpu.v[2], right);
+                    assert_eq!(cpu.nzcv, 0xa);
+                    assert_eq!(cpu.pc, 4);
+                }
+            }
+        }};
+    }
+    check!("saddl v0.8h, v1.8b, v2.8b", 0x0e22_0020);
+    check!("uaddl2 v0.8h, v1.16b, v2.16b", 0x6e22_0020);
+    check!("saddw v0.8h, v1.8h, v2.8b", 0x0e22_1020);
+    check!("usubw2 v0.2d, v1.2d, v2.4s", 0x6ea2_3020);
+    check!("ssubl v0.4s, v1.4h, v2.4h", 0x0e62_2020);
+    check!("addhn v0.8b, v1.8h, v2.8h", 0x0e22_4020);
+    check!("raddhn2 v0.16b, v1.8h, v2.8h", 0x6e22_4020);
+    check!("rsubhn v0.4h, v1.4s, v2.4s", 0x2e62_6020);
+    check!("uabal v0.8h, v1.8b, v2.8b", 0x2e22_5020);
+    check!("sabdl2 v0.4s, v1.8h, v2.8h", 0x4e62_7020);
+    check!("umlal v0.8h, v1.8b, v2.8b", 0x2e22_8020);
+    check!("smlsl v0.2d, v1.2s, v2.2s", 0x0ea2_a020);
+    check!("umull v0.8h, v1.8b, v2.8b", 0x2e22_c020);
+    check!("smull2 v0.4s, v1.8h, v2.8h", 0x4e62_c020);
+    check!("sqdmull v0.4s, v1.4h, v2.4h", 0x0e62_d020);
+    check!("sqdmlal v0.2d, v1.2s, v2.2s", 0x0ea2_9020);
+    check!("sqdmlsl2 v0.4s, v1.8h, v2.8h", 0x4e62_b020);
+    check!("pmull v0.8h, v1.8b, v2.8b", 0x0e22_e020);
+    check!("pmull2 v0.1q, v1.2d, v2.2d", 0x4ee2_e020);
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[test]
+fn three_same_matches_native_neon() {
+    let samples = [
+        0u128,
+        u128::MAX,
+        0x8001_7ffe_7fff_8000_00ff_0102_80ff_7f01,
+        0x3f80_0000_4000_0000_bf80_0000_7fc0_0000,
+    ];
+    macro_rules! check {
+        ($instruction:literal, $word:expr) => {{
+            for &left in &samples {
+                for &right in &samples {
+                    let prior = left.rotate_left(17) ^ right;
+                    let mut native = 0u128;
+                    unsafe {
+                        std::arch::asm!(
+                            "ldr q0, [{prior}]",
+                            "ldr q1, [{left}]",
+                            "ldr q2, [{right}]",
+                            $instruction,
+                            "str q0, [{output}]",
+                            prior = in(reg) &prior,
+                            left = in(reg) &left,
+                            right = in(reg) &right,
+                            output = in(reg) &mut native,
+                            out("v0") _,
+                            out("v1") _,
+                            out("v2") _,
+                            options(nostack, preserves_flags),
+                        );
+                    }
+                    let mut cpu = cpu_for($word);
+                    cpu.v[0] = prior;
+                    cpu.v[1] = left;
+                    cpu.v[2] = right;
+                    cpu.step().unwrap();
+                    assert_eq!(
+                        cpu.v[0], native,
+                        "{} left={left:#x} right={right:#x} prior={prior:#x}",
+                        $instruction
+                    );
+                }
+            }
+        }};
+    }
+    check!("mul v0.16b, v1.16b, v2.16b", 0x4e229c20);
+    check!("mla v0.8h, v1.8h, v2.8h", 0x4e629420);
+    check!("mls v0.4s, v1.4s, v2.4s", 0x6ea29420);
+    check!("pmul v0.16b, v1.16b, v2.16b", 0x6e229c20);
+    check!("shadd v0.16b, v1.16b, v2.16b", 0x4e220420);
+    check!("srhadd v0.8h, v1.8h, v2.8h", 0x4e621420);
+    check!("uhadd v0.16b, v1.16b, v2.16b", 0x6e220420);
+    check!("urhadd v0.8b, v1.8b, v2.8b", 0x2e221420);
+    check!("shsub v0.8b, v1.8b, v2.8b", 0x0e222420);
+    check!("uhsub v0.4h, v1.4h, v2.4h", 0x2e622420);
+    check!("sshl v0.8h, v1.8h, v2.8h", 0x4e624420);
+    check!("sshl v0.2d, v1.2d, v2.2d", 0x4ee24420);
+    check!("sshl d0, d1, d2", 0x5ee24420);
+    check!("ushl v0.2d, v1.2d, v2.2d", 0x6ee24420);
+    check!("sqshl v0.2d, v1.2d, v2.2d", 0x4ee24c20);
+    check!("uqshl v0.2d, v1.2d, v2.2d", 0x6ee24c20);
+    check!("srshl v0.2d, v1.2d, v2.2d", 0x4ee25420);
+    check!("urshl v0.2d, v1.2d, v2.2d", 0x6ee25420);
+    check!("sqrshl v0.2d, v1.2d, v2.2d", 0x4ee25c20);
+    check!("uqrshl v0.2d, v1.2d, v2.2d", 0x6ee25c20);
+    check!("sqshl v0.4s, v1.4s, v2.4s", 0x4ea24c20);
+    check!("srshl v0.8b, v1.8b, v2.8b", 0x0e225420);
+    check!("sqrshl v0.4h, v1.4h, v2.4h", 0x0e625c20);
+    check!("ushl v0.2s, v1.2s, v2.2s", 0x2ea24420);
+    check!("uqshl v0.16b, v1.16b, v2.16b", 0x6e224c20);
+    check!("urshl v0.4s, v1.4s, v2.4s", 0x6ea25420);
+    check!("uqrshl v0.8h, v1.8h, v2.8h", 0x6e625c20);
+    check!("sabd v0.16b, v1.16b, v2.16b", 0x4e227420);
+    check!("saba v0.8h, v1.8h, v2.8h", 0x4e627c20);
+    check!("uabd v0.16b, v1.16b, v2.16b", 0x6e227420);
+    check!("uaba v0.4s, v1.4s, v2.4s", 0x6ea27c20);
+    check!("sqdmulh v0.4s, v1.4s, v2.4s", 0x4ea2b420);
+    check!("sqdmulh v0.8h, v1.8h, v2.8h", 0x4e62b420);
+    check!("fmla v0.4s, v1.4s, v2.4s", 0x4e22cc20);
+    check!("fmls v0.2d, v1.2d, v2.2d", 0x4ee2cc20);
+    check!("fmulx v0.4s, v1.4s, v2.4s", 0x4e22dc20);
+    check!("fmax v0.4s, v1.4s, v2.4s", 0x4e22f420);
+    check!("fmin v0.2s, v1.2s, v2.2s", 0x0ea2f420);
+    check!("fmaxnm v0.4s, v1.4s, v2.4s", 0x4e22c420);
+    check!("fminnm v0.2d, v1.2d, v2.2d", 0x4ee2c420);
+    check!("fcmeq v0.4s, v1.4s, v2.4s", 0x4e22e420);
+    check!("fcmgt v0.4s, v1.4s, v2.4s", 0x6ea2e420);
+    check!("fcmge v0.2s, v1.2s, v2.2s", 0x2e22e420);
+    check!("facgt v0.4s, v1.4s, v2.4s", 0x6ea2ec20);
+    check!("facge v0.4s, v1.4s, v2.4s", 0x6e22ec20);
+    check!("faddp v0.4s, v1.4s, v2.4s", 0x6e22d420);
+    check!("fmaxp v0.4s, v1.4s, v2.4s", 0x6e22f420);
+    check!("fminp v0.2s, v1.2s, v2.2s", 0x2ea2f420);
+    check!("fabd v0.4s, v1.4s, v2.4s", 0x6ea2d420);
+    check!("fmaxnmp v0.4s, v1.4s, v2.4s", 0x6e22c420);
+    check!("fminnmp v0.2d, v1.2d, v2.2d", 0x6ee2c420);
+    check!("frecps v0.4s, v1.4s, v2.4s", 0x4e22fc20);
+    check!("frsqrts v0.4s, v1.4s, v2.4s", 0x4ea2fc20);
+    check!("sqshl b0, b1, b2", 0x5e224c20);
+    check!("uqshl d0, d1, d2", 0x7ee24c20);
+    check!("sshl d0, d1, d2", 0x5ee24420);
+    check!("fmax s0, s1, s2", 0x1e224820);
+    check!("fmin d0, d1, d2", 0x1e625820);
+    check!("fmaxnm s0, s1, s2", 0x1e226820);
+    check!("fnmul s0, s1, s2", 0x1e228820);
+    check!("fmulx s0, s1, s2", 0x5e22dc20);
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[test]
+fn by_element_matches_native_neon() {
+    let samples = [
+        0u128,
+        u128::MAX,
+        0x8001_7ffe_7fff_8000_00ff_0102_80ff_7f01,
+        0x3f80_0000_4000_0000_bf80_0000_7fc0_0000,
+    ];
+    macro_rules! check {
+        ($instruction:literal, $word:expr) => {{
+            for &left in &samples {
+                for &right in &samples {
+                    let prior = left.rotate_left(17) ^ right;
+                    let mut native = 0u128;
+                    unsafe {
+                        std::arch::asm!(
+                            "ldr q0, [{prior}]",
+                            "ldr q1, [{left}]",
+                            "ldr q2, [{right}]",
+                            $instruction,
+                            "str q0, [{output}]",
+                            prior = in(reg) &prior,
+                            left = in(reg) &left,
+                            right = in(reg) &right,
+                            output = in(reg) &mut native,
+                            out("v0") _,
+                            out("v1") _,
+                            out("v2") _,
+                            options(nostack, preserves_flags),
+                        );
+                    }
+                    let mut cpu = cpu_for($word);
+                    cpu.v[0] = prior;
+                    cpu.v[1] = left;
+                    cpu.v[2] = right;
+                    cpu.step().unwrap();
+                    assert_eq!(
+                        cpu.v[0], native,
+                        "{} left={left:#x} right={right:#x} prior={prior:#x}",
+                        $instruction
+                    );
+                }
+            }
+        }};
+    }
+    check!("mul v0.8h, v1.8h, v2.h[0]", 0x4f428020);
+    check!("mul v0.4s, v1.4s, v2.s[1]", 0x4fa28020);
+    check!("mla v0.8h, v1.8h, v2.h[2]", 0x6f620020);
+    check!("mls v0.4s, v1.4s, v2.s[3]", 0x6fa24820);
+    check!("smlal v0.4s, v1.4h, v2.h[0]", 0x0f422020);
+    check!("smlal2 v0.4s, v1.8h, v2.h[1]", 0x4f522020);
+    check!("smull v0.4s, v1.4h, v2.h[0]", 0x0f42a020);
+    check!("umlal v0.2d, v1.2s, v2.s[0]", 0x2f822020);
+    check!("umull v0.4s, v1.4h, v2.h[0]", 0x2f42a020);
+    check!("umlsl v0.2d, v1.2s, v2.s[0]", 0x2f826020);
+    check!("sqdmulh v0.4s, v1.4s, v2.s[1]", 0x4fa2c020);
+    check!("sqdmlal v0.4s, v1.4h, v2.h[0]", 0x0f423020);
+    check!("sqdmlsl2 v0.4s, v1.8h, v2.h[3]", 0x4f727020);
+    check!("sqdmull v0.2d, v1.2s, v2.s[1]", 0x0fa2b020);
+    check!("fmla v0.4s, v1.4s, v2.s[0]", 0x4f821020);
+    check!("fmls v0.2d, v1.2d, v2.d[1]", 0x4fc25820);
+    check!("fmul v0.4s, v1.4s, v2.s[2]", 0x4f829820);
+    check!("fmulx v0.2d, v1.2d, v2.d[0]", 0x6fc29020);
+    check!("sqdmulh s0, s1, v2.s[0]", 0x5f82c020);
+    check!("fmla s0, s1, v2.s[0]", 0x5f821020);
+    check!("sqdmlal d0, s1, v2.s[1]", 0x5fa23020);
+    check!("sqdmlal d0, s1, s2", 0x5ea29020);
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[test]
+fn fixed_point_converts_match_native() {
+    let inputs = [
+        0u64,
+        1,
+        2,
+        3,
+        0x7fff_ffff,
+        0x8000_0000,
+        0xffff_ffff,
+        1 << 20,
+        1 << 40,
+        1 << 63,
+        u64::MAX,
+        42,
+    ];
+    macro_rules! to_float {
+        ($instruction:literal, $word:expr) => {{
+            for &input in &inputs {
+                let native: u64;
+                unsafe {
+                    std::arch::asm!(
+                        "mov x1, {input}",
+                        $instruction,
+                        "fmov {output}, d0",
+                        input = in(reg) input,
+                        output = out(reg) native,
+                        out("x1") _,
+                        out("v0") _,
+                        options(nostack, preserves_flags),
+                    );
+                }
+                let mut cpu = cpu_for($word);
+                cpu.x[1] = input;
+                cpu.step().unwrap();
+                assert_eq!(
+                    cpu.v[0] as u64, native,
+                    "{} input={input:#x}",
+                    $instruction
+                );
+            }
+        }};
+    }
+    macro_rules! to_int {
+        ($instruction:literal, $word:expr, $float_bits:expr) => {{
+            for &input in &inputs {
+                let pattern = if $float_bits >= 64 {
+                    input
+                } else {
+                    input & ((1u64 << $float_bits) - 1)
+                };
+                let native: u64;
+                unsafe {
+                    std::arch::asm!(
+                        "fmov d1, {input}",
+                        $instruction,
+                        "mov {output}, x0",
+                        input = in(reg) pattern,
+                        output = out(reg) native,
+                        out("x0") _,
+                        out("v1") _,
+                        options(nostack, preserves_flags),
+                    );
+                }
+                let mut cpu = cpu_for($word);
+                cpu.v[1] = u128::from(pattern);
+                cpu.step().unwrap();
+                assert_eq!(cpu.x[0], native, "{} input={pattern:#x}", $instruction);
+            }
+        }};
+    }
+    to_float!("scvtf s0, w1, #1", 0x1e02fc20);
+    to_float!("scvtf s0, w1, #32", 0x1e028020);
+    to_float!("scvtf d0, w1, #32", 0x1e428020);
+    to_float!("scvtf s0, x1, #32", 0x9e028020);
+    to_float!("scvtf d0, x1, #64", 0x9e420020);
+    to_float!("ucvtf s0, w1, #16", 0x1e03c020);
+    to_float!("ucvtf d0, x1, #32", 0x9e438020);
+    to_int!("fcvtzs w0, s1, #32", 0x1e188020, 32);
+    to_int!("fcvtzs x0, d1, #32", 0x9e588020, 64);
+    to_int!("fcvtzu w0, s1, #1", 0x1e19fc20, 32);
+    to_int!("fcvtzu x0, d1, #64", 0x9e590020, 64);
+    // Scalar fused multiply must not be rejected as a shift.
+    let mut cpu = cpu_for(0x1f220420);
+    cpu.v[1] = 0x3f80_0000;
+    cpu.v[2] = 0x4000_0000;
+    cpu.step().unwrap();
+}
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[test]
+fn modified_immediate_matches_native_neon() {
+    let samples = [
+        0u128,
+        u128::MAX,
+        0x8001_7ffe_7fff_8000_00ff_0102_80ff_7f01,
+        0x3f80_0000_4000_0000_bf80_0000_7fc0_0000,
+    ];
+    macro_rules! check {
+        ($instruction:literal, $word:expr) => {{
+            for &left in &samples {
+                let prior = left.rotate_left(17);
+                let mut native = 0u128;
+                unsafe {
+                    std::arch::asm!(
+                        "ldr q0, [{prior}]",
+                        "ldr q1, [{left}]",
+                        $instruction,
+                        "str q0, [{output}]",
+                        prior = in(reg) &prior,
+                        left = in(reg) &left,
+                        output = in(reg) &mut native,
+                        out("v0") _,
+                        out("v1") _,
+                        options(nostack, preserves_flags),
+                    );
+                }
+                let mut cpu = cpu_for($word);
+                cpu.v[0] = prior;
+                cpu.v[1] = left;
+                cpu.step().unwrap();
+                assert_eq!(cpu.v[0], native, "{} left={left:#x} prior={prior:#x}", $instruction);
+            }
+        }};
+    }
+    check!("sqshl v0.4s, v1.4s, #4", 0x4f247420);
+    check!("uqshl v0.8h, v1.8h, #3", 0x6f137420);
+    check!("sqshlu v0.16b, v1.16b, #2", 0x6f0a6420);
+    check!("shrn v0.4h, v1.4s, #8", 0x0f188420);
+    check!("rshrn v0.8b, v1.8h, #4", 0x0f0c8c20);
+    check!("sqshrn v0.4h, v1.4s, #8", 0x0f189420);
+    check!("sqrshrn v0.8b, v1.8h, #4", 0x0f0c9c20);
+    check!("sqshrun v0.4h, v1.4s, #8", 0x2f188420);
+    check!("sqrshrun v0.8b, v1.8h, #4", 0x2f0c8c20);
+    check!("uqshrn v0.4h, v1.4s, #8", 0x2f189420);
+    check!("uqrshrn v0.8b, v1.8h, #4", 0x2f0c9c20);
+    check!("shrn2 v0.8h, v1.4s, #8", 0x4f188420);
+    check!("sqshl s0, s1, #8", 0x5f287420);
+    check!("sqshl d0, d1, #8", 0x5f487420);
+    check!("scvtf v0.2s, v1.2s, #8", 0x0f38e420);
+    check!("scvtf v0.4s, v1.4s, #16", 0x4f30e420);
+    check!("fcvtzs v0.2s, v1.2s, #8", 0x0f38fc20);
+    check!("fcvtzu v0.2s, v1.2s, #8", 0x2f38fc20);
+    check!("ucvtf v0.2d, v1.2d, #4", 0x6f7ce420);
+    check!("fcvtzs s0, s1, #8", 0x5f38fc20);
+    check!("fcvtn v0.2s, v1.2d", 0x0e616820);
+    check!("fcvtn2 v0.4s, v1.2d", 0x4e616820);
+    check!("fcvtl v0.2d, v1.2s", 0x0e617820);
+    check!("fcvtl2 v0.2d, v1.4s", 0x4e617820);
 }
 
 mod indexed_float;

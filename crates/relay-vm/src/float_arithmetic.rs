@@ -339,6 +339,155 @@ fn comparison_result_and_exception_domains() {
     assert_eq!(flags & !129, 0);
 }
 
+/// FSQRT S/D. Guest FPCR selects rounding, flush, and default NaN. The host
+/// rounding mode is never changed.
+pub(crate) fn square_root(input: u64, double: bool, fpcr: u64) -> (u64, u64) {
+    if double {
+        sqrt_bits(input, 63, 52, 1023, 0x7ff, fpcr)
+    } else {
+        sqrt_bits(input as u32 as u64, 31, 23, 127, 0xff, fpcr)
+    }
+}
+
+fn sqrt_bits(
+    input: u64,
+    sign_bit: u32,
+    frac_bits: u32,
+    bias: i32,
+    exp_max: u64,
+    fpcr: u64,
+) -> (u64, u64) {
+    let sign = 1u64 << sign_bit;
+    let width_mask = sign | (sign - 1);
+    let input = input & width_mask;
+    let fraction = (1u64 << frac_bits) - 1;
+    let quiet = 1u64 << (frac_bits - 1);
+    let default_nan = (exp_max << frac_bits) | quiet;
+    let exp = (input >> frac_bits) & exp_max;
+    let frac = input & fraction;
+    let flush = fpcr & (1 << 24) != 0;
+    if exp == exp_max {
+        if frac != 0 {
+            let signaling = frac & quiet == 0;
+            let nan = if fpcr & (1 << 25) != 0 {
+                default_nan
+            } else {
+                input | quiet
+            };
+            return (nan, u64::from(signaling));
+        }
+        return if input & sign == 0 {
+            (input, 0)
+        } else {
+            (default_nan, 1)
+        };
+    }
+    if input & !sign == 0 {
+        return (input, 0);
+    }
+    if exp == 0 && flush {
+        return (input & sign, 128);
+    }
+    if input & sign != 0 {
+        return (default_nan, 1);
+    }
+
+    let (mut sig, exp_stored) = if exp == 0 {
+        let width = 64 - frac.leading_zeros();
+        let shift = frac_bits + 1 - width;
+        ((u128::from(frac) << shift), 1 - shift as i32)
+    } else {
+        (u128::from((1u64 << frac_bits) | frac), exp as i32)
+    };
+    let mut power = exp_stored - bias - frac_bits as i32;
+    if power % 2 != 0 {
+        sig <<= 1;
+        power -= 1;
+    }
+    let sig_bits = 128 - sig.leading_zeros();
+    let needed = frac_bits + 3 - sig_bits / 2;
+    let room = (127 - sig_bits) / 2;
+    let k = needed.min(room);
+    let root = (sig << (2 * k)).isqrt();
+    let exact = root * root == sig << (2 * k);
+    let root_top = 127 - root.leading_zeros();
+    let align = root_top as i32 - frac_bits as i32;
+    let (main, guard, sticky) = if align >= 0 {
+        let drop = align as u32;
+        let lost = if drop == 0 {
+            0
+        } else {
+            root & ((1u128 << drop) - 1)
+        };
+        let guard = drop > 0 && (lost >> (drop - 1)) & 1 == 1;
+        let sticky = !exact || (drop > 1 && lost & ((1u128 << (drop - 1)) - 1) != 0);
+        (root >> drop, guard, sticky)
+    } else {
+        (root << (-align) as u32, false, !exact)
+    };
+    let stored = power / 2 - k as i32 + root_top as i32 + bias;
+    let mode = ((fpcr >> 22) & 3) as u32;
+    if stored <= 0 {
+        let drop = (1 - stored) as u32;
+        let (sig, guard, sticky) = sticky_shift(main, guard, sticky, drop);
+        let inexact = guard || sticky;
+        let mut bits = sig as u64;
+        if round_away(mode, bits & 1 == 1, guard, sticky) {
+            bits += 1;
+        }
+        let mut flags = u64::from(inexact) * 16;
+        if flush {
+            return (0, 8);
+        }
+        if inexact {
+            flags |= 8;
+        }
+        if bits >> frac_bits != 0 {
+            return ((1u64 << frac_bits) | (bits & fraction), flags);
+        }
+        return (bits & fraction, flags);
+    }
+    let mut bits = main as u64;
+    let inexact = guard || sticky;
+    if round_away(mode, bits & 1 == 1, guard, sticky) {
+        bits += 1;
+    }
+    let mut stored = stored;
+    if bits >> (frac_bits + 1) != 0 {
+        bits >>= 1;
+        stored += 1;
+    }
+    let flags = u64::from(inexact) * 16;
+    if stored as u64 >= exp_max {
+        return ((exp_max << frac_bits), flags | 4);
+    }
+    ((stored as u64) << frac_bits | (bits & fraction), flags)
+}
+
+fn sticky_shift(sig: u128, guard: bool, sticky: bool, drop: u32) -> (u128, bool, bool) {
+    if drop == 0 {
+        return (sig, guard, sticky);
+    }
+    if drop >= 128 {
+        return (0, false, sig != 0 || guard || sticky);
+    }
+    let lost = sig & ((1u128 << drop) - 1);
+    let new_guard = (lost >> (drop - 1)) & 1 == 1;
+    let lower = drop > 1 && lost & ((1u128 << (drop - 1)) - 1) != 0;
+    (sig >> drop, new_guard, sticky || guard || lower)
+}
+
+fn round_away(mode: u32, lsb: bool, guard: bool, sticky: bool) -> bool {
+    if !guard && !sticky {
+        return false;
+    }
+    match mode {
+        0 => guard && (sticky || lsb),
+        1 => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

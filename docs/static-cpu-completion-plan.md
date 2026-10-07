@@ -5,10 +5,133 @@ VM and OCI-in-VM path, with both 4 KiB and 16 KiB guests. This is not a claim
 that every Relay backend, every ARM extension, or every Wawona platform is done.
 Existing mandatory WASI bundles and other product targets must keep working.
 
-## Current ordered work map (2026-10-01)
+## Completeness scorecard (2026-10-06)
 
-Rough total engineering estimate: 50% (45-55% range). This is judgment, not
-coverage or an acceptance ratio. Historical checkpoints below retain dates.
+iOS / iPadOS VM capability stays **planned**. Completely complete means every
+row in `static-cpu-acceptance.md` plus a store-shaped IPA that boots NixOS on
+device. That bar is **0%**. Simulator `E4A1C0DE` is not STARDUST and is not
+App Store processing.
+
+Judgment only. Harness counts, live seconds, and Kani SUCCESS are not this
+percentage. Whole-VM mathematical proof does not exist. Kani 0.68.0 plus Verus
+0.2026.09.27.3cf1832 cover named helpers (37 harnesses, `FORMAL_OK` on digest
+`0e20b45b…`). Miri is UB, not math.
+
+| Number | Meaning | Value |
+| --- | --- | --- |
+| Completely complete (iOS Mode A Linux VM + OCI, store) | All 12 acceptance gates and ASC/device | **0%** |
+| Twelve-gate progress | Unweighted mean of the table below | **~59%** |
+| Six-gap campaign | `relay_acceptance_gaps` items | **~85%** of those six, not of the product |
+| Formal coverage of the VM | Named helpers vs interpreter + devices + Linux | **low single digits** |
+
+Proof machine for the six-gap work: `E4A1C0DE` only. Guest `guest-4k-auth10`.
+Live log: `Wawona/.artifacts/relay-build/logs/guest-4k-auth17-smoke.log`.
+
+### Twelve-gate table (iOS Mode A StaticCpu)
+
+Weights are equal. Partial is judgment from the listed evidence.
+
+| Gate | % | Evidence | Still reject |
+| --- | --- | --- | --- |
+| CPU memory semantics | 70 | Native SIMD splits, AF, selected walks | Full advertised ISA / descriptor legality |
+| Trace integrity | 60 | JSONL hashes and self-replay | Full-system reference adapter |
+| Linux PID 1 | 100 | systemd as init on 4 KiB and 16 KiB | none for this gate |
+| NixOS Stage 2 | 100 | Activation then real PID 1 | none for this gate |
+| systemd target | 100 | `Reached target Multi-User System` on both granules historically; 4 KiB auth17 at guest 585.79s | failed required units on a fresh 16 KiB image |
+| Automatic login | 80 | `wawona` session on recent 4 KiB boots | Host-driven login; 16 KiB parity this week |
+| Readiness | 55 | `WAWONA_RELAY_AUTH_OK=1` on vsock 1025 (`WWN1`) plus `WAWONA_RELAY_READY=1` on auth10-17 | Console READY alone; missing verified artifact-hash binding in the receipt |
+| Wayland | 85 | auth18: `Relay imported SHM frame: 800x600 sha256=5b6add91…7379c3` after OPEN_FILE 15 MiB + BUFFER_DIFF | iland present in app UI; 16 KiB parity |
+| Interaction | 0 | none | keyboard, Multi-Touch, resize, clipboard, audio, reconnect, shutdown |
+| Page-size parity | 45 | Multi-User on 4 KiB and 16 KiB earlier; 4 KiB has AUTH + DNS this week | Same AUTH + imported frame + nix run on 16 KiB |
+| OCI lifecycle | 15 | Digest/extract tests, confinement regressions | Guest crun create/start/stop in StaticCpu |
+| Distribution | 0 | iOS 13 / SDK 26.5 link and Simulator smoke | Signed STARDUST run, TestFlight, ASC |
+
+Mean of the twelve percentages: **~59%**. Round to **55-60%** in chat. Do not
+quote the six-gap campaign percent as product complete.
+
+### Six-gap campaign (cursor plan)
+
+| Item | Status | Proof |
+| --- | --- | --- |
+| link-app | done | `wwn_waypipe_client_fd` on the iOS sim archive; iPadOS `WWNRelay.m` compiles |
+| multi-user | done | 4 KiB and 16 KiB Multi-User + `WAWONA_RELAY_READY=1` with journal forward |
+| disk-lifecycle | done | Marker, stop, grow 8 GiB, restart, marker back on `E4A1C0DE` |
+| nixpkgs-dns | partial | virtio-net NAT; `wawona-fastfetch: dns ok` (`channels.nixos.org` → 151.101.21.91). `nix run` dies TLS EOF on `api.github.com`. No `wawona-fastfetch: end` |
+| vsock-frame | done (4 KiB) | auth18 imported 800x600 SHM frame. READY=1. Keep Work Status until app shows it |
+| aot-measure | blocked on frame | 3-insn oracle match; two host threads; SharedRam after join; `nixos_translated=0`. No boot profile, no NixOS translate, no speed claim |
+
+### Shortest calendar path (required)
+
+Goal is minimum wall-clock to the remaining acceptance gates, not a faster
+guest and not a speed claim. One live StaticCpu. One proof disk. Fix the
+narrowest host bug that unblocks the next gate. Do not widen the ISA, rebuild
+the guest, or open a second product surface until the current gate is green.
+
+Critical path (serial). Everything else waits or rides the same boot:
+
+```text
+live 4 KiB auth17
+  -> host SHM import (take_frame + sha256)     [now]
+  -> same-boot nix run print if TLS already patched, else next smoke batches TLS
+  -> one replacement smoke only if the importer binary must change
+  -> 16 KiB same binary, same importer (parity, not a new design)
+  -> measure that boot, offline AOT of that closure
+  -> one Multi-Touch + Stop on E4A1C0DE
+  -> one OCI create/start/stop in the same engine
+  -> crate2nix + STARDUST + ASC last
+```
+
+P0, this week, do in this order:
+
+1. **Imported SHM frame (only P0).** BUFFER_DIFF already arrives. Do not rebuild
+   NixOS, weston, or waypipe. Do not add GPU. Capture one live WMSG, write a
+   failing `shm_import` unit test, make `take_frame` log
+   `Relay imported SHM frame … sha256=`. Touch only importer + its Kani/Verus
+   helper so the formal restamp stays small. Kill and relaunch `static_smoke`
+   only after that stamp. Keep `ProjectStatusView` until that log line exists.
+2. **nix run print on the same guest.** DNS is done. Do not change `relay.nix`
+   flake URLs until host TLS is proved. If auth17 still hits `api.github.com`
+   EOF, the next smoke (the SHM binary) is the TLS retry. Exit:
+   `wawona-fastfetch: end` plus a real fastfetch print. Not a host DNS test.
+3. **16 KiB only after 4 KiB has a frame hash.** Same host importer. No second
+   protocol. No 16 KiB guest rebuild unless that boot dies on a new opcode.
+
+P1, only after P0 frame hash:
+
+4. **AOT measure of that closure.** Profile the proven boot. Translate offline.
+   StaticCpu stays oracle and fallback. Two host threads already exist. Record
+   cold Multi-User, first frame, translator time, signed text, fallback bytes.
+   Translator never in the store IPA. No fastest/cleanest sentence.
+5. **Thin interaction.** One Multi-Touch tap that the guest sees, then Stop that
+   returns to Machines. Defer clipboard, audio, resize, reconnect until that
+   pair is green.
+6. **Thin OCI.** One verified bundle create/start/stop/kill on StaticCpu. Defer
+   publisher trust, virtiofs, and snapshot schema.
+
+P2, last (does not shorten P0):
+
+7. crate2nix for the mobile staticlib. Signed STARDUST. Store IPA audit
+   (jitless, no `MAP_JIT`, no HV). ASC/TestFlight as their own gates.
+
+Hard time-savers (do not schedule):
+
+- Second live `static_smoke` while one guest is up
+- Guest image rebuild to "help" SHM while BUFFER_DIFF is already on the wire
+- 16 KiB, AOT of NixOS, ISA catalog, full-system reference, GIC completeness,
+  virtio-rng, virtiofs, SwiftUI, crate2nix, STARDUST, or ASC before the 4 KiB
+  frame hash
+- Formal restamp caused by editing `aot.rs` / `net_host.rs` during an importer-only
+  fix
+- Decoder work unless the live guest stops on an unimplemented instruction
+- Mode B `IosHv` on this path. Mode A iOS stays StaticCpu / Pulley
+
+Mode A iOS stays StaticCpu / Pulley. Formal stamp before Relay VM cargo.
+
+## Historical ordered work map (2026-10-01)
+
+Rough total engineering estimate then: 50% (45-55% range). Superseded as the
+headline number by the 2026-10-06 scorecard above. Historical checkpoints below
+retain dates.
 
 | Order | Current evidence | Remaining acceptance |
 | --- | --- | --- |
@@ -18,7 +141,7 @@ coverage or an acceptance ratio. Historical checkpoints below retain dates.
 | 4. Transport/graphics | Both guests send real vsock bytes; real native host waypipe FD entry is linked, reconnect/stop unit tests pass | Actual native session, authenticated readiness, genuine imported guest frame; VZ direction/readiness repair |
 | 5. Devices/OCI | Block, console, vsock wired | rng/net/fs, OCI lifecycle, real input/resize/clipboard/audio/reconnect/shutdown |
 | 6. Verification | 26 Kani, 15 Verus; full36 strict Miri suites, prior452,538 ASan fuzz runs | Full-system differential reference and real native-worker concurrency validation |
-| 7. Performance/AOT | Fused semantics corrected before speed work | Pure guest AOT implementation/evaluation; reproducible benchmarks after graphics acceptance |
+| 7. Performance/AOT | Offline signed image, software TLB, invalidation, and one host thread per vCPU call `execute_fetched`. Translator is `aot-translate`, not the store staticlib. A 3-instruction block matches StaticCpu with zero fallback. Two vCPUs run on two host threads. NixOS image is not translated. No speed claim. | Profile a real boot, translate that closure, shared RAM, then measure. |
 | 8. Physical/distribution | Current exact phone/watch signing and strict bundle gates pass | Exact signed app installed and launches on unlocked STARDUST; guest runtime and distribution export/validation |
 
 Current physical UI finding: the actual native VM editor exposed only Backend,

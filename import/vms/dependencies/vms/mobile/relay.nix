@@ -300,17 +300,29 @@ in
     # Console text is diagnostic only. Authentication and a genuine
     # imported guest frame are separate host acceptance gates.
     "ignore_loglevel"
+    # Never use systemd.log_target=console. That sets console_only and
+    # drops journal copies of status lines. fbcon then takes /dev/console
+    # before Multi-User, so hvc0 never sees "Reached target Multi-User".
   ];
+  # Journal forward keeps Multi-User and unit status lines on hvc0 after
+  # fbcon claims /dev/console. Pair with StandardOutput=journal+console
+  # on the Wayland session unit.
+  services.journald.settings.Journal = {
+    ForwardToConsole = true;
+    TTYPath = "/dev/hvc0";
+    MaxLevelConsole = "info";
+  };
   # Relay CPU boots the ext4 rootfs off virtio-blk (/dev/vda). The
   # engine passes the kernel + this rootfs directly (no bootloader).
   # Keep the real virtio transport loaded at sysinit as well as stage 1,
   # instead of relying on net-pf-40's VMCI alias.
   # This is a no-op for the 16 KiB kernel where the transport is builtin.
-  boot.kernelModules = [ "vmw_vsock_virtio_transport" ];
+  boot.kernelModules = [ "vmw_vsock_virtio_transport" "virtio_net" ];
   boot.initrd.availableKernelModules = {
     virtio_mmio = true;
     virtio_blk = true;
     virtio_console = true;
+    virtio_net = true;
     vmw_vsock_virtio_transport = true;
     virtiofs = true;
     fuse = true;
@@ -322,7 +334,25 @@ in
   fileSystems."/" = {
     device = "/dev/vda";
     fsType = "ext4";
+    # Records the intent. Scripted stage 1 (boot.initrd.systemd.enable
+    # is false) mounts this root before systemd, so the x-systemd.growfs
+    # option this flag adds never runs. wawona-grow-root does the grow.
     autoResize = true;
+  };
+  # Grow the mounted ext4 to the virtio-blk device after the host has
+  # lengthened the raw image. resize2fs is a no-op when the filesystem
+  # already fills the device. Existing files stay. Disks are grow-only.
+  systemd.services.wawona-grow-root = {
+    description = "Grow the ext4 root to the virtio disk";
+    wantedBy = [ "local-fs.target" ];
+    after = [ "systemd-remount-fs.service" ];
+    before = [ "local-fs.target" ];
+    unitConfig.DefaultDependencies = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.e2fsprogs}/bin/resize2fs /dev/vda";
+    };
   };
   # Host Relay shares an OCI runtime bundle (config.json + rootfs/) with
   # tag `oci-bundle` via Virtualization.framework virtiofs. Absent share
@@ -355,12 +385,29 @@ in
   # 0 disables only this prompt alarm. user@.service TimeoutStartSec stays.
   # Set the key through security.loginDefs. Do not replace /etc/login.defs.
   security.loginDefs.settings.LOGIN_TIMEOUT = 0;
-  # StaticCpu has no virtio-net. NixOS dhcpcd is Type=forking with waitip,
-  # so "Starting DHCP Client" cannot finish: the daemon reports no
-  # interfaces and times out. Do not lengthen that deadline. Omit the
-  # client until the net device exists. Loopback still reaches network.target.
+  # StaticCpu presents virtio-net and answers DHCP on 10.0.2.0/24.
+  # Apple VZ presents its own virtio-net and its own DHCP server.
+  # Nix disables substituters when the only address is loopback, so the
+  # client has to stay enabled on both paths. Predictable names would
+  # rename the MMIO device away from the ip=eth0 boot argument.
+  networking.usePredictableInterfaceNames = false;
+  # Kernel ip= already stamps 10.0.2.15. dhcpcd still took the lease, then
+  # systemd TimeoutStartSec killed it and dhcpcd deleted the default route
+  # (4 KiB auth4: lease at 561s, SIGTERM at 581s, resolv.conf without a
+  # nameserver, getaddrinfo -2). Static IPv4 only. No dhcpcd.
   networking.useDHCP = false;
   networking.dhcpcd.enable = false;
+  networking.interfaces.eth0.ipv4.addresses = [
+    {
+      address = "10.0.2.15";
+      prefixLength = 24;
+    }
+  ];
+  networking.defaultGateway = {
+    address = "10.0.2.2";
+    interface = "eth0";
+  };
+  networking.nameservers = [ "10.0.2.3" ];
 
   # Software rendering only. Relay presents guest Wayland SHM through
   # Wawona's userspace display path; no guest GPU passthrough.
@@ -373,7 +420,37 @@ in
     waypipe
     wayland-utils
     crun
+    python3
   ];
+
+  # StaticCpu guests use the userspace NAT resolver at 10.0.2.3.
+  # NixOS often leaves only 127.0.0.53 (systemd-resolved). That stub
+  # never reaches the NAT, so curl and nix both fail before any HTTP
+  # status. A non-loopback nameserver is left alone (Apple VZ DHCP).
+  systemd.services.wawona-slirp-dns = {
+    description = "Publish Relay NAT DNS when the guest has no upstream resolver";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network-online.target" "network.target" ];
+    wants = [ "network-online.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      /run/current-system/sw/bin/ip link set eth0 up || true
+      /run/current-system/sw/bin/ip -4 addr replace 10.0.2.15/24 dev eth0 || true
+      /run/current-system/sw/bin/ip -4 route replace default via 10.0.2.2 dev eth0 || true
+      if [ -x /run/current-system/sw/bin/resolvectl ]; then
+        /run/current-system/sw/bin/resolvectl dns eth0 10.0.2.3 || true
+        /run/current-system/sw/bin/resolvectl domain eth0 '~.' || true
+      fi
+      tmp=$(mktemp)
+      printf 'nameserver 10.0.2.3\n' > "$tmp"
+      rm -f /etc/resolv.conf
+      mv "$tmp" /etc/resolv.conf
+      chmod 644 /etc/resolv.conf
+    '';
+  };
 
   # Nested Wayland session forwarded to the host over vsock on boot.
   # When the host shares an OCI bundle, skip Foot and run crun instead.
@@ -405,18 +482,171 @@ in
     script = ''
       # This StaticCpu guest has no Vulkan/DRM render device. Negotiate
       # real SHM transport; host Metal/iland presentation remains required.
-      exec ${pkgs.waypipe}/bin/waypipe --no-gpu --vsock -s ${toString vsockPort} server -- \
+      exec ${pkgs.waypipe}/bin/waypipe --no-gpu --compress none --vsock -s ${toString vsockPort} server -- \
         ${lib.escapeShellArgs config.wawona.relay.sessionCommand}
     '';
     postStart = ''
       set -eu
+      install -d /home/wawona
+      if [ ! -f /home/wawona/relay-disk-marker ]; then
+        printf 'E4A1C0DE\n' > /home/wawona/relay-disk-marker
+      fi
+      printf 'WAWONA_RELAY_DISK_MARKER=%s\n' "$(cat /home/wawona/relay-disk-marker)"
       sleep 2
       # A failed main process must never publish a startup marker.
-      # This remains a transport-start hint, not authenticated readiness.
+      # Host acceptance still requires authenticated vsock + a real SHM
+      # frame. This line is the guest-side half of that gate.
       test -n "$MAINPID"
       kill -0 "$MAINPID"
-      printf 'WAWONA_RELAY_TRANSPORT_STARTED=1\n'
+      printf 'WAWONA_RELAY_READY=1\n'
     '';
+  };
+
+  # Session authentication over vsock port 1025. Host provisions an
+  # ephemeral key and challenge; the guest answers with HMAC-SHA256 over
+  # machine/session IDs, artifact hashes, and unit state. Console READY
+  # alone is never acceptance. Binding matches Relay guest_session.rs.
+  systemd.services.wawona-session-auth = {
+    description = "Wawona Relay authenticated readiness over vsock";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "wawona-session.service" ];
+    requires = [ "wawona-session.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      TimeoutStartSec = "180s";
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
+    path = with pkgs; [
+      coreutils
+      python3
+      systemd
+    ];
+    script = ''
+      set -eu
+      systemctl is-active --quiet wawona-session.service
+      ${pkgs.python3}/bin/python3 - <<'PY'
+import binascii, ctypes, hashlib, hmac, socket, struct, sys
+unit = "multi-user+wawona-session"
+AF_VSOCK = getattr(socket, "AF_VSOCK", 40)
+try:
+    s = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+except (AttributeError, OSError):
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.socket(AF_VSOCK, socket.SOCK_STREAM, 0)
+    if fd < 0:
+        print("WAWONA_RELAY_AUTH_SKIP=no-af-vsock")
+        sys.exit(0)
+    s = socket.fromfd(fd, AF_VSOCK, socket.SOCK_STREAM)
+s.settimeout(45)
+try:
+    s.connect((2, 1025))
+except OSError as exc:
+    print(f"WAWONA_RELAY_AUTH_SKIP=connect:{exc}")
+    sys.exit(0)
+f = s.makefile("rwb", buffering=0)
+key_line = f.readline().decode().strip()
+chal_line = f.readline().decode().strip()
+if not key_line.startswith("WWN1 KEY "):
+    print("WAWONA_RELAY_AUTH_FAIL=bad-key")
+    sys.exit(1)
+key = binascii.unhexlify(key_line.split()[2])
+parts = chal_line.split()
+if parts[:2] != ["WWN1", "CHALLENGE"] or len(parts) < 8:
+    print("WAWONA_RELAY_AUTH_FAIL=bad-challenge")
+    sys.exit(1)
+ver, machine, session, kernel, rootfs, nonce = parts[2:8]
+buf = struct.pack("<I", int(ver))
+buf += machine.encode() + b"\0" + session.encode() + b"\0"
+buf += kernel.encode() + b"\0" + rootfs.encode() + b"\0"
+buf += binascii.unhexlify(nonce)
+buf += unit.encode()
+mac = hmac.new(key, buf, hashlib.sha256).hexdigest()
+resp = f"WWN1 READY {ver} {machine} {session} {kernel} {rootfs} {unit} {mac}\n"
+f.write(resp.encode())
+f.flush()
+ack = f.readline().decode().strip()
+print(ack)
+if not ack.startswith("WWN1 OK"):
+    print("WAWONA_RELAY_AUTH_FAIL=bad-ack")
+    sys.exit(1)
+print("WAWONA_RELAY_AUTH_OK=1")
+PY
+    '';
+  };
+
+  # Proof that an uninstalled nixpkgs package fetches through virtio-net NAT
+  # DNS. Host unit tests of cache.nixos.org A records are not this gate.
+  # Full channels.nixos.org nixexprs.tar.xz timed out at curl's 300s under
+  # StaticCpu and exhausted NAT TCP slots; use a tiny cache.nixos.org realise.
+  systemd.services.wawona-fastfetch = {
+    description = "Fetch and run an uninstalled nixpkgs package over Relay NAT";
+    after = [
+      "multi-user.target"
+      "wawona-slirp-dns.service"
+      "network-online.target"
+      "wawona-session.service"
+    ];
+    wants = [ "network-online.target" ];
+    unitConfig.RefuseManualStart = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      TimeoutStartSec = "2400s";
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
+    path = with pkgs; [
+      nix
+      coreutils
+      curl
+      iproute2
+      python3
+    ];
+    script = ''
+      set -eu
+      printf 'wawona-fastfetch: start\n'
+      /run/current-system/sw/bin/ip -4 addr show dev eth0 || true
+      printf 'nameserver 10.0.2.3\n' > /etc/resolv.conf
+      cat /etc/resolv.conf || true
+      i=0
+      while [ "$i" -lt 60 ]; do
+        if ${pkgs.python3}/bin/python3 -c "import socket; print(socket.gethostbyname('cache.nixos.org'))"; then
+          printf 'wawona-fastfetch: dns ok\n'
+          break
+        fi
+        i=$((i + 1))
+        sleep 2
+      done
+      # nix's embedded libcurl ignores NIX_CURL_FLAGS (still 300s). Drive HTTPS
+      # with the curl binary under a StaticCpu-sized budget, then realise.
+      printf 'nameserver 10.0.2.3\n' > /etc/resolv.conf
+      ${pkgs.curl}/bin/curl -fL --connect-timeout 120 --max-time 7200 --retry 5 \
+        -o /tmp/nix-cache-info https://cache.nixos.org/nix-cache-info
+      cat /tmp/nix-cache-info
+      path=/nix/store/kwhxkl8yn5y8wqiq11jsybagw3fbc4iv-hello-2.12.3
+      i=0
+      while [ "$i" -lt 5 ]; do
+        printf 'nameserver 10.0.2.3\n' > /etc/resolv.conf
+        if nix-store --realise "$path"; then
+          break
+        fi
+        i=$((i + 1))
+        sleep 5
+      done
+      "$path/bin/hello"
+      printf 'wawona-fastfetch: end\n'
+    '';
+  };
+
+  systemd.timers.wawona-fastfetch = {
+    description = "Start nixpkgs#fastfetch after Multi-User";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "5s";
+      Unit = "wawona-fastfetch.service";
+    };
   };
 
   systemd.services.wawona-container = {
@@ -457,7 +687,7 @@ in
       printf 'WAWONA_RELAY_TRANSPORT_STARTED=1\n' > /dev/hvc0
       # This StaticCpu guest has no Vulkan/DRM render device. Negotiate
       # real SHM transport; host Metal/iland presentation remains required.
-      exec ${pkgs.waypipe}/bin/waypipe --no-gpu --vsock -s ${toString vsockPort} server -- \
+      exec ${pkgs.waypipe}/bin/waypipe --no-gpu --compress none --vsock -s ${toString vsockPort} server -- \
         ${pkgs.crun}/bin/crun run --bundle "$work" wawona-oci
     '';
     postStop = ''
@@ -469,6 +699,10 @@ in
   # second nixpkgs source tree in every prebuilt image.
   nix.enable = true;
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
+  nix.settings.http2 = false;
+  nix.settings.connect-timeout = 300;
+  nix.settings.stalled-download-timeout = 300;
+  nix.settings.download-attempts = 20;
   nixpkgs.flake.setNixPath = false;
   nixpkgs.flake.setFlakeRegistry = false;
   documentation.enable = false;

@@ -33,11 +33,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let guest_args = vec![
-        "wasm".into(),
-        module.display().to_string(),
-        "hello".into(),
-    ];
+    let guest_args = vec!["wasm".into(), module.display().to_string(), "hello".into()];
 
     println!(
         "wawona-wasm Mode A bench backend={} module={} iters={}",

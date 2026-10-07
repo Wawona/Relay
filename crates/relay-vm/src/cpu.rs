@@ -103,7 +103,7 @@ impl StaticCpu {
             self.x[register as usize] = value;
         }
     }
-    fn x(&self, register: u32) -> u64 {
+    pub(crate) fn x(&self, register: u32) -> u64 {
         if register == 31 {
             0
         } else {
@@ -168,6 +168,20 @@ impl StaticCpu {
                 status: Some(0x10),
                 error,
             })?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+    pub(crate) fn peek_word(&self, address: u64) -> Result<u32, RelayError> {
+        let mut bytes = [0; 4];
+        let physical = self
+            .translate(
+                address,
+                crate::mmu::AccessType::Execute {
+                    wxn: self.sysregs.sctlr_el1 & (1 << 19) != 0,
+                },
+                self.sysregs.current_el,
+            )
+            .map_err(|fault| fault.error)?;
+        self.memory.read(physical, &mut bytes)?;
         Ok(u32::from_le_bytes(bytes))
     }
     fn physical(&self, address: u64) -> Result<u64, RelayError> {
@@ -298,15 +312,19 @@ impl StaticCpu {
         Ok(())
     }
     fn take_pending_irq(&mut self) -> Result<(), RelayError> {
-        if let Some(irq) = self.sysregs.pending_timer_irq() {
-            // Architected timers are PPIs delivered through the GIC CPU
-            // interface. Keep the level asserted until the guest masks or
-            // reprograms the corresponding timer control register.
-            self.bus.raise_irq(irq);
+        let irq_masked = self.sysregs.daif & 0x80 != 0;
+        if !irq_masked {
+            if let Some(irq) = self.sysregs.pending_timer_irq() {
+                // Architected timers are PPIs delivered through the GIC CPU
+                // interface. Keep the level asserted until the guest masks or
+                // reprograms the corresponding timer control register. Do not
+                // re-pend the timer while IRQs are masked: that put PPI 27
+                // back at the front of every IAR inside the handler, so
+                // virtio-net (GIC 67) never ran after the guest left TX poll.
+                self.bus.raise_irq(irq);
+            }
         }
-        if self.sysregs.daif & 0x80 != 0
-            || (self.bus.pending_irq().is_none() && !self.sysregs.timer_pending())
-        {
+        if irq_masked || (self.bus.pending_irq().is_none() && !self.sysregs.timer_pending()) {
             return Ok(());
         }
         // IRQs share privilege/stack/PSTATE entry with synchronous exceptions.
@@ -673,6 +691,16 @@ impl StaticCpu {
                 return Err(fault.error);
             }
         };
+        self.execute_fetched(pc, insn)
+    }
+
+    /// Run one instruction word that the caller already fetched.
+    ///
+    /// `step` loads the word from guest memory. Offline AOT passes a word
+    /// from the signed image after checking those bytes still match.
+    /// Float, MMU, exceptions, and virtio stay in this function.
+    pub(crate) fn execute_fetched(&mut self, pc: u64, insn: u32) -> Result<(), RelayError> {
+        self.pc = pc;
         self.prior_pc = self.last_pc;
         self.prior_insn = self.last_insn;
         self.last_pc = pc;
@@ -794,6 +822,19 @@ impl StaticCpu {
         // trapping instruction so Linux can return directly to userspace.
         if insn & 0xffe0_001f == 0xd400_0001 {
             self.enter_svc(((insn >> 5) & 0xffff) as u16, next);
+            return Ok(());
+        }
+        // BRK is a software breakpoint (EC=0b111100). HLT with debug disabled
+        // is an undefined instruction. Both stay in the guest instead of
+        // stopping the vCPU.
+        if insn & 0xffe0_001f == 0xd420_0000 {
+            self.sysregs.esr_el1 = 0xf200_0000 | u64::from((insn >> 5) & 0xffff);
+            self.enter_exception(next, 0);
+            return Ok(());
+        }
+        if insn & 0xffe0_001f == 0xd440_0000 {
+            self.sysregs.esr_el1 = 0x0200_0000;
+            self.enter_exception(next, 0);
             return Ok(());
         }
         // B.cond: the early boot path chiefly needs EQ/NE, but model all
@@ -1556,40 +1597,46 @@ impl StaticCpu {
             let scalar = insn & (1 << 28) != 0;
             let wide = insn & (1 << 30) != 0;
             let unsigned = insn & (1 << 29) != 0;
-            if immediate < 8 || (scalar && !wide) || (shift_opcode == 0x0f00_4400 && !unsigned) {
-                return self.unsupported(pc, insn);
+            // immh == 0 is not a shift. Scalar FMADD and other families reuse
+            // these opcode bits, so this class must fall through.
+            // Scalar with Q=0 is not this class. FNMADD/FMADD reuse the
+            // masked bits and must fall through to the scalar FP decoder.
+            if immediate >= 8 && !(scalar && !wide) {
+                if shift_opcode == 0x0f00_4400 && !unsigned {
+                    return self.unsupported(pc, insn);
+                }
+                let bits = 1 << (31 - immediate.leading_zeros());
+                if (scalar && bits != 64) || (!wide && bits == 64) {
+                    return self.unsupported(pc, insn);
+                }
+                let left = shift_opcode == 0x0f00_5400;
+                let shift = if left {
+                    immediate - bits
+                } else {
+                    bits * 2 - immediate
+                };
+                let mask = low_mask(bits);
+                let rd = (insn & 31) as usize;
+                let source = self.v[((insn >> 5) & 31) as usize];
+                let previous = self.v[rd];
+                let mut result = 0u128;
+                for lane in 0..(if wide && !scalar { 128 } else { 64 } / bits) {
+                    let value = (source >> (lane * bits)) as u64 & mask;
+                    let prior = (previous >> (lane * bits)) as u64 & mask;
+                    let shifted = simd_immediate_shift(
+                        value,
+                        prior,
+                        bits,
+                        shift,
+                        ((shift_opcode >> 12) & 7) as u8,
+                        unsigned,
+                    );
+                    result |= u128::from(shifted & mask) << (lane * bits);
+                }
+                self.v[rd] = result;
+                self.pc = next;
+                return Ok(());
             }
-            let bits = 1 << (31 - immediate.leading_zeros());
-            if (scalar && bits != 64) || (!wide && bits == 64) {
-                return self.unsupported(pc, insn);
-            }
-            let left = shift_opcode == 0x0f00_5400;
-            let shift = if left {
-                immediate - bits
-            } else {
-                bits * 2 - immediate
-            };
-            let mask = low_mask(bits);
-            let rd = (insn & 31) as usize;
-            let source = self.v[((insn >> 5) & 31) as usize];
-            let previous = self.v[rd];
-            let mut result = 0u128;
-            for lane in 0..(if wide && !scalar { 128 } else { 64 } / bits) {
-                let value = (source >> (lane * bits)) as u64 & mask;
-                let prior = (previous >> (lane * bits)) as u64 & mask;
-                let shifted = simd_immediate_shift(
-                    value,
-                    prior,
-                    bits,
-                    shift,
-                    ((shift_opcode >> 12) & 7) as u8,
-                    unsigned,
-                );
-                result |= u128::from(shifted & mask) << (lane * bits);
-            }
-            self.v[rd] = result;
-            self.pc = next;
-            return Ok(());
         }
         // SSHLL/USHLL and their upper-half forms widen before shifting.
         if insn & 0x9f80_fc00 == 0x0f00_a400 {
@@ -1612,6 +1659,29 @@ impl StaticCpu {
                     sign_extend(value, bits) as u64
                 };
                 result |= u128::from((extended << shift) & result_mask) << (lane * bits * 2);
+            }
+            self.v[(insn & 31) as usize] = result;
+            self.pc = next;
+            return Ok(());
+        }
+        // SHLL/SHLL2 shift each source element left by its own width and
+        // write the widened lane. The shift equals the element size, so the
+        // SSHLL immediate encoding cannot represent it. Q selects the upper
+        // source half. The result is always a full 128-bit vector.
+        if insn & 0xbf3f_fc00 == 0x2e21_3800 {
+            let size = (insn >> 22) & 3;
+            if size == 3 {
+                return self.unsupported(pc, insn);
+            }
+            let bits = 8u32 << size;
+            let source = self.v[((insn >> 5) & 31) as usize]
+                >> (if insn & (1 << 30) != 0 { 64 } else { 0 });
+            let mask = low_mask(bits);
+            let wide_mask = low_mask(bits * 2);
+            let mut result = 0u128;
+            for lane in 0..(64 / bits) {
+                let value = (source >> (lane * bits)) as u64 & mask;
+                result |= u128::from((value << bits) & wide_mask) << (lane * bits * 2);
             }
             self.v[(insn & 31) as usize] = result;
             self.pc = next;
@@ -1766,6 +1836,50 @@ impl StaticCpu {
             self.v[(insn & 31) as usize] = u128::from_le_bytes(result);
             self.pc = next;
             return Ok(());
+        }
+        // AdvSIMD three-different: long add/sub/multiply, narrow-high,
+        // absolute difference, and polynomial multiply. Q selects the
+        // narrow source half, or the written destination half for ADDHN.
+        if insn & 0x9f20_0c00 == 0x0e20_0000 {
+            let rd = (insn & 31) as usize;
+            let Some((result, saturated)) = simd_three_different(
+                self.v[((insn >> 5) & 31) as usize],
+                self.v[((insn >> 16) & 31) as usize],
+                self.v[rd],
+                (insn >> 22) & 3,
+                insn & (1 << 30) != 0,
+                insn & (1 << 29) != 0,
+                (insn >> 12) & 15,
+            ) else {
+                return self.unsupported(pc, insn);
+            };
+            self.v[rd] = result;
+            self.sysregs.fpsr |= u64::from(saturated) << 27;
+            self.pc = next;
+            return Ok(());
+        }
+        // Scalar three-different. Q=1 selects the scalar encoding, not the
+        // upper source half. One widened lane is written and the rest clears.
+        if insn & 0xbf20_0c00 == 0x1e20_0000 && insn & (1 << 30) != 0 {
+            let rd = (insn & 31) as usize;
+            let size = (insn >> 22) & 3;
+            if let Some((result, saturated)) = simd_three_different(
+                self.v[((insn >> 5) & 31) as usize],
+                self.v[((insn >> 16) & 31) as usize],
+                self.v[rd],
+                size,
+                false,
+                insn & (1 << 29) != 0,
+                (insn >> 12) & 15,
+            ) {
+                let wide_bits = (8u32 << size) * 2;
+                if wide_bits <= 64 {
+                    self.v[rd] = u128::from((result as u64) & low_mask(wide_bits));
+                    self.sysregs.fpsr |= u64::from(saturated) << 27;
+                    self.pc = next;
+                    return Ok(());
+                }
+            }
         }
         // Single-structure LD/ST1..4 lane transfers and LD1R..4R broadcasts.
         // Q selects the lane's upper index bit, not a destructive vector width.
@@ -2225,6 +2339,34 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // Vector integer ABS/NEG. A 64-bit element needs Q. The minimum
+        // negative value stays itself, which is two's-complement wrap.
+        let integer_abs = insn & 0xbf3f_fc00;
+        if matches!(integer_abs, 0x0e20_b800 | 0x2e20_b800) {
+            let wide = insn & (1 << 30) != 0;
+            let size = (insn >> 22) & 3;
+            if size == 3 && !wide {
+                return self.unsupported(pc, insn);
+            }
+            let bits = 8u32 << size;
+            let lanes = (if wide { 128 } else { 64 }) / bits;
+            let mask = u128::from(low_mask(bits));
+            let source = self.v[((insn >> 5) & 31) as usize];
+            let mut result = 0u128;
+            for lane in 0..lanes {
+                let value = (source >> (lane * bits)) & mask;
+                let negative = value & (1u128 << (bits - 1)) != 0;
+                let out = if integer_abs == 0x0e20_b800 && !negative {
+                    value
+                } else {
+                    value.wrapping_neg() & mask
+                };
+                result |= out << (lane * bits);
+            }
+            self.v[(insn & 31) as usize] = result;
+            self.pc = next;
+            return Ok(());
+        }
         // TBL/TBX concatenate 1..4 registers, wrapping V31 to V0. Capture
         // operands before writing Rd so every permitted overlap is preserved.
         if insn & 0xbfe0_8c00 == 0x0e00_0000 {
@@ -2365,6 +2507,28 @@ impl StaticCpu {
             0x2ea1_9800 => Some(7),
             _ => None,
         };
+        // Vector FSQRT S/D. Half-precision and a 64-bit element without Q
+        // stay rejected.
+        if insn & 0xbfbf_fc00 == 0x2ea1_f800 {
+            let wide = insn & (1 << 30) != 0;
+            let double = insn & (1 << 22) != 0;
+            if double && !wide {
+                return self.unsupported(pc, insn);
+            }
+            let bits = if double { 64 } else { 32 };
+            let source = self.v[((insn >> 5) & 31) as usize];
+            let mut result = 0u128;
+            for lane in 0..((if wide { 128 } else { 64 }) / bits) {
+                let input = (source >> (lane * bits)) as u64;
+                let (value, flags) =
+                    crate::float_arithmetic::square_root(input, double, self.sysregs.fpcr);
+                result |= u128::from(value) << (lane * bits);
+                self.sysregs.fpsr |= flags;
+            }
+            self.v[(insn & 31) as usize] = result;
+            self.pc = next;
+            return Ok(());
+        }
         if let Some(mode) = vector_round_mode {
             let wide = insn & (1 << 30) != 0;
             let double = insn & (1 << 22) != 0;
@@ -2388,6 +2552,17 @@ impl StaticCpu {
                 self.sysregs.fpsr |= flags;
             }
             self.v[(insn & 31) as usize] = result;
+            self.pc = next;
+            return Ok(());
+        }
+        // Scalar FSQRT S/D. Bit 22 selects double. Registers sit in the low bits.
+        if insn & 0xffbf_fc00 == 0x1e21_c000 {
+            let double = insn & (1 << 22) != 0;
+            let source = self.v[((insn >> 5) & 31) as usize] as u64;
+            let (result, flags) =
+                crate::float_arithmetic::square_root(source, double, self.sysregs.fpcr);
+            self.v[(insn & 31) as usize] = u128::from(result);
+            self.sysregs.fpsr |= flags;
             self.pc = next;
             return Ok(());
         }
@@ -2652,6 +2827,46 @@ impl StaticCpu {
             self.pc = next;
             return Ok(());
         }
+        // Fixed-point SCVTF/UCVTF. fbits = 64 - scale, one rounding.
+        if insn & 0x7fbe_0000 == 0x1e02_0000 {
+            let fbits = 64 - ((insn >> 10) & 63);
+            let wide = insn & (1 << 31) != 0;
+            if !wide && fbits > 32 {
+                return self.unsupported(pc, insn);
+            }
+            let (result, flags) = crate::float_convert::fixed_integer_to_float(
+                self.x((insn >> 5) & 31),
+                wide,
+                insn & (1 << 16) == 0,
+                insn & (1 << 22) != 0,
+                fbits,
+                self.sysregs.fpcr,
+            );
+            self.v[(insn & 31) as usize] = u128::from(result);
+            self.sysregs.fpsr |= flags;
+            self.pc = next;
+            return Ok(());
+        }
+        // Fixed-point FCVTZS/FCVTZU, toward zero, with the same fbits rule.
+        if insn & 0x7fbe_0000 == 0x1e18_0000 {
+            let fbits = 64 - ((insn >> 10) & 63);
+            let wide = insn & (1 << 31) != 0;
+            if !wide && fbits > 32 {
+                return self.unsupported(pc, insn);
+            }
+            let (result, flags) = crate::float_convert::float_to_fixed(
+                self.v[((insn >> 5) & 31) as usize] as u64,
+                insn & (1 << 22) != 0,
+                wide,
+                insn & (1 << 16) == 0,
+                fbits,
+                self.sysregs.fpcr,
+            );
+            self.set(insn & 31, result);
+            self.sysregs.fpsr |= flags;
+            self.pc = next;
+            return Ok(());
+        }
         // FMOV/FABS/FNEG are bit operations: even signaling NaNs keep
         // their payload without changing FPSR or being flushed to zero.
         let scalar_unary = insn & 0xffbf_fc00;
@@ -2778,6 +2993,32 @@ impl StaticCpu {
                 self.read32(address)? as u64
             };
             self.set(insn & 31, value);
+            self.pc = next;
+            return Ok(());
+        }
+        // LDR (literal) for S, D, and Q. LDRSW (literal) sign-extends a word.
+        // PRFM (literal) is a non-faulting hint.
+        if insn & 0x3f00_0000 == 0x1c00_0000 {
+            let bytes = match insn >> 30 {
+                0 => 4,
+                1 => 8,
+                2 => 16,
+                _ => return self.unsupported(pc, insn),
+            };
+            let address =
+                pc.wrapping_add((sign_extend(((insn >> 5) & 0x7ffff) as u64, 19) << 2) as u64);
+            self.v[(insn & 31) as usize] = self.read_vector(address, bytes)?;
+            self.pc = next;
+            return Ok(());
+        }
+        if insn & 0xff00_0000 == 0x9800_0000 {
+            let address =
+                pc.wrapping_add((sign_extend(((insn >> 5) & 0x7ffff) as u64, 19) << 2) as u64);
+            self.set(insn & 31, self.read32(address)? as i32 as i64 as u64);
+            self.pc = next;
+            return Ok(());
+        }
+        if insn & 0xff00_0000 == 0xd800_0000 {
             self.pc = next;
             return Ok(());
         }
@@ -3089,7 +3330,9 @@ impl StaticCpu {
             let bytes = if opc == 2 { 8 } else { 4 };
             let load = insn & 0x0040_0000 != 0;
             let mode = (insn >> 23) & 3;
-            if opc == 1 && (!load || mode != 2) {
+            // LDPSW has post-index, signed-offset, and pre-index forms.
+            // The non-temporal mode is not allocated for the sign-extending pair.
+            if opc == 1 && (!load || mode == 0) {
                 return self.unsupported(pc, insn);
             }
             let offset = sign_extend(((insn >> 15) & 0x7f) as u64, 7) * i64::from(bytes);
@@ -3284,6 +3527,139 @@ impl StaticCpu {
         }
         // Relay performs page-table walks directly and has no cached TLB.
         if insn & 0xfff0_f000 == 0xd500_8000 {
+            self.pc = next;
+            return Ok(());
+        }
+        // AdvSIMD three-same integer and floating-point. Scalar integer forms
+        // keep Q=1. Scalar FP forms in this class also use Q=1 (FMAX S/D in
+        // the scalar FP space is handled below).
+        let three_same_vector = insn & 0x9f20_0400 == 0x0e20_0400;
+        let three_same_scalar = insn & 0xdf20_0400 == 0x5e20_0400;
+        if three_same_vector || three_same_scalar {
+            let rd = (insn & 31) as usize;
+            if let Some((result, saturated, flags)) = simd_three_same(
+                self.v[((insn >> 5) & 31) as usize],
+                self.v[((insn >> 16) & 31) as usize],
+                self.v[rd],
+                insn & (1 << 30) != 0,
+                insn & (1 << 29) != 0,
+                (insn >> 22) & 3,
+                (insn >> 11) & 31,
+                three_same_scalar,
+                self.sysregs.fpcr,
+            ) {
+                self.v[rd] = result;
+                self.sysregs.fpsr |= flags | (u64::from(saturated) << 27);
+                self.pc = next;
+                return Ok(());
+            }
+        }
+        // Scalar S/D FMAX, FMIN, FMAXNM, FMINNM, and FNMUL.
+        if matches!(insn & 0xff20_c000, 0x1e20_4000 | 0x1e20_8000) {
+            let kind = (insn >> 12) & 15;
+            if matches!(kind, 4 | 5 | 6 | 7 | 8) {
+                let double = insn & (1 << 22) != 0;
+                let left = self.v[((insn >> 5) & 31) as usize] as u64;
+                let right = self.v[((insn >> 16) & 31) as usize] as u64;
+                let (result, flags) = if kind == 8 {
+                    let (value, flags) = crate::float_arithmetic::binary(
+                        left,
+                        right,
+                        double,
+                        crate::float_arithmetic::Operation::Multiply,
+                        self.sysregs.fpcr,
+                    );
+                    let sign = 1u64 << if double { 63 } else { 31 };
+                    (value ^ sign, flags)
+                } else {
+                    scalar_float_minmax(
+                        left,
+                        right,
+                        double,
+                        kind >= 6,
+                        kind & 1 != 0,
+                        self.sysregs.fpcr,
+                    )
+                };
+                self.v[(insn & 31) as usize] = u128::from(result);
+                self.sysregs.fpsr |= flags;
+                self.pc = next;
+                return Ok(());
+            }
+        }
+        // AdvSIMD multiply-by-element. Bit 28 selects the scalar form.
+        // Indexed FMUL S/D is decoded earlier and does not reach here.
+        if insn & 0x8f00_0400 == 0x0f00_0000 {
+            let size = (insn >> 22) & 3;
+            let rm = if size == 1 {
+                (insn >> 16) & 15
+            } else {
+                (insn >> 16) & 31
+            };
+            let rd = (insn & 31) as usize;
+            if let Some((result, saturated, flags)) = simd_by_element(
+                self.v[((insn >> 5) & 31) as usize],
+                self.v[rm as usize],
+                self.v[rd],
+                insn,
+                self.sysregs.fpcr,
+            ) {
+                self.v[rd] = result;
+                self.sysregs.fpsr |= flags | (u64::from(saturated) << 27);
+                self.pc = next;
+                return Ok(());
+            }
+        }
+        // Saturating, narrowing, and fixed-point AdvSIMD immediate shifts.
+        // Non-saturating SSHR/SHL were decoded earlier. immh == 0 falls through.
+        if insn & 0x8f00_0400 == 0x0f00_0400 {
+            let rd = (insn & 31) as usize;
+            if let Some((result, saturated, flags)) = simd_modified_immediate(
+                self.v[((insn >> 5) & 31) as usize],
+                self.v[rd],
+                insn,
+                self.sysregs.fpcr,
+            ) {
+                self.v[rd] = result;
+                self.sysregs.fpsr |= flags | (u64::from(saturated) << 27);
+                self.pc = next;
+                return Ok(());
+            }
+        }
+        // FCVTN/FCVTL between single and double. Half-precision forms do not match.
+        if insn & 0xbfbf_ec00 == 0x0e61_6800 {
+            let rd = (insn & 31) as usize;
+            let source = self.v[((insn >> 5) & 31) as usize];
+            let upper = insn & (1 << 30) != 0;
+            let widen = insn & (1 << 12) != 0;
+            let mut flags = 0u64;
+            if widen {
+                let mut result = 0u128;
+                for lane in 0..2u32 {
+                    let single = vector_element(source, u32::from(upper) * 2 + lane, 32) as u32;
+                    let (value, extra) =
+                        crate::float_convert::widen_single(single, self.sysregs.fpcr);
+                    result |= u128::from(value) << (lane * 64);
+                    flags |= extra;
+                }
+                self.v[rd] = result;
+            } else {
+                let mut packed = 0u64;
+                for lane in 0..2u32 {
+                    let (value, extra) = crate::float_convert::narrow_double(
+                        vector_element(source, lane, 64),
+                        self.sysregs.fpcr,
+                    );
+                    packed |= u64::from(value) << (lane * 32);
+                    flags |= extra;
+                }
+                self.v[rd] = if upper {
+                    (self.v[rd] & u128::from(u64::MAX)) | (u128::from(packed) << 64)
+                } else {
+                    u128::from(packed)
+                };
+            }
+            self.sysregs.fpsr |= flags;
             self.pc = next;
             return Ok(());
         }
@@ -3843,6 +4219,903 @@ fn integer_reductions_match_scalar_specification() {
     } else {
         assert!(member);
     }
+}
+
+fn vector_element(vector: u128, index: u32, bits: u32) -> u64 {
+    ((vector >> (index * bits)) as u64) & low_mask(bits)
+}
+
+fn extend_element(value: u64, bits: u32, unsigned: bool) -> i128 {
+    if unsigned {
+        i128::from(value & low_mask(bits))
+    } else {
+        i128::from(sign_extend(value & low_mask(bits), bits))
+    }
+}
+
+fn wrapping_element(value: i128, bits: u32) -> u64 {
+    (value as u64) & low_mask(bits)
+}
+
+fn signed_saturate(value: i128, bits: u32) -> (u64, bool) {
+    let minimum = if bits >= 64 {
+        i128::from(i64::MIN)
+    } else {
+        -(1i128 << (bits - 1))
+    };
+    let maximum = if bits >= 64 {
+        i128::from(i64::MAX)
+    } else {
+        (1i128 << (bits - 1)) - 1
+    };
+    if value > maximum {
+        (maximum as u64, true)
+    } else if value < minimum {
+        (minimum as u64 & low_mask(bits), true)
+    } else {
+        (value as u64 & low_mask(bits), false)
+    }
+}
+
+fn unsigned_saturate(value: i128, bits: u32) -> (u64, bool) {
+    let maximum = (1i128 << bits) - 1;
+    if value < 0 {
+        (0, true)
+    } else if value > maximum {
+        (low_mask(bits), true)
+    } else {
+        (value as u64, false)
+    }
+}
+
+fn scalar_float_minmax(
+    mut left: u64,
+    mut right: u64,
+    double: bool,
+    numbers: bool,
+    min: bool,
+    fpcr: u64,
+) -> (u64, u64) {
+    if !double {
+        left &= 0xffff_ffff;
+        right &= 0xffff_ffff;
+    }
+    let sign = 1u64 << if double { 63 } else { 31 };
+    let (nzcv, flags) = crate::float_arithmetic::compare(left, right, double, !numbers, fpcr);
+    if nzcv == 3 {
+        let (exponent, fraction, quiet, default_nan) = if double {
+            (
+                0x7ff0_0000_0000_0000u64,
+                0x000f_ffff_ffff_ffff,
+                1u64 << 51,
+                0x7ff8_0000_0000_0000,
+            )
+        } else {
+            (0x7f80_0000, 0x007f_ffff, 1u64 << 22, 0x7fc0_0000)
+        };
+        let nan = |value: u64| value & exponent == exponent && value & fraction != 0;
+        if numbers && nan(left) != nan(right) {
+            return (if nan(left) { right } else { left }, flags);
+        }
+        let chosen = if nan(left) { left } else { right };
+        return (
+            if fpcr & (1 << 25) != 0 {
+                default_nan
+            } else {
+                chosen | quiet
+            },
+            flags,
+        );
+    }
+    if nzcv == 6 {
+        if (left | right) & !sign == 0 {
+            return (if min { left | right } else { 0 }, flags);
+        }
+        return (left, flags);
+    }
+    let pick_left = if min { nzcv == 8 } else { nzcv == 2 };
+    (if pick_left { left } else { right }, flags)
+}
+
+fn polynomial_product(left: u64, right: u64, bits: u32) -> u128 {
+    let mut result = 0u128;
+    let left = u128::from(left & low_mask(bits));
+    for bit in 0..bits {
+        if right & (1u64 << bit) != 0 {
+            result ^= left << bit;
+        }
+    }
+    result
+}
+
+/// AdvSIMD three-same. `size` is bits 23:22. Floating-point opcodes use bit 22
+/// as the S/D select and bit 23 as the paired-operation select.
+fn simd_three_same(
+    vn: u128,
+    vm: u128,
+    vd: u128,
+    wide: bool,
+    unsigned: bool,
+    size: u32,
+    opcode: u32,
+    scalar: bool,
+    fpcr: u64,
+) -> Option<(u128, bool, u64)> {
+    if opcode >= 0x18 {
+        return simd_three_same_float(vn, vm, vd, wide, unsigned, size, opcode, scalar, fpcr);
+    }
+    let bits = 8u32 << size;
+    if bits == 64 && !wide && !scalar {
+        return None;
+    }
+    if scalar && !wide {
+        return None;
+    }
+    let lanes = if scalar {
+        1
+    } else {
+        (if wide { 128 } else { 64 }) / bits
+    };
+    let mut result = 0u128;
+    let mut saturated = false;
+    for lane in 0..lanes {
+        let left = vector_element(vn, lane, bits);
+        let right = vector_element(vm, lane, bits);
+        let prior = vector_element(vd, lane, bits);
+        let (value, clipped) = three_same_integer(left, right, prior, bits, unsigned, opcode)?;
+        result |= u128::from(value) << (lane * bits);
+        saturated |= clipped;
+    }
+    Some((result, saturated, 0))
+}
+
+fn three_same_integer(
+    left: u64,
+    right: u64,
+    prior: u64,
+    bits: u32,
+    unsigned: bool,
+    opcode: u32,
+) -> Option<(u64, bool)> {
+    let signed_left = extend_element(left, bits, false);
+    let signed_right = extend_element(right, bits, false);
+    let unsigned_left = extend_element(left, bits, true);
+    let unsigned_right = extend_element(right, bits, true);
+    let halving = |subtract: bool, round: bool| -> u64 {
+        let (a, b) = if unsigned {
+            (unsigned_left, unsigned_right)
+        } else {
+            (signed_left, signed_right)
+        };
+        let mut value = if subtract { a - b } else { a + b };
+        if round {
+            value += 1;
+        }
+        wrapping_element(value >> 1, bits)
+    };
+    Some(match opcode {
+        0x00 => (halving(false, false), false),
+        0x02 => (halving(false, true), false),
+        0x04 => (halving(true, false), false),
+        0x08 | 0x09 | 0x0a | 0x0b => variable_shift(
+            left,
+            right,
+            bits,
+            !unsigned,
+            opcode & 2 != 0,
+            opcode & 1 != 0,
+        ),
+        0x0e | 0x0f => {
+            let distance = if unsigned {
+                (unsigned_left - unsigned_right).unsigned_abs()
+            } else {
+                (signed_left - signed_right).unsigned_abs()
+            };
+            if opcode == 0x0e {
+                (wrapping_element(distance as i128, bits), false)
+            } else {
+                // SABA/UABA wrap. The signedness selects the difference, not saturation.
+                let accumulator = extend_element(prior, bits, unsigned);
+                (
+                    wrapping_element(accumulator + distance as i128, bits),
+                    false,
+                )
+            }
+        }
+        // MLA/MUL when U=0. MLS/PMUL when U=1. The low half of the product
+        // does not depend on signedness.
+        0x12 | 0x13 => {
+            if opcode == 0x13 && unsigned {
+                if bits != 8 {
+                    return None;
+                }
+                (polynomial_product(left, right, 8) as u64 & 0xff, false)
+            } else if opcode == 0x13 {
+                (
+                    wrapping_element(signed_left.wrapping_mul(signed_right), bits),
+                    false,
+                )
+            } else {
+                let product = signed_left.wrapping_mul(signed_right);
+                let accumulator = extend_element(prior, bits, false);
+                let combined = if unsigned {
+                    accumulator.wrapping_sub(product)
+                } else {
+                    accumulator.wrapping_add(product)
+                };
+                (wrapping_element(combined, bits), false)
+            }
+        }
+        0x16 if !unsigned && matches!(bits, 16 | 32) => {
+            signed_saturate((signed_left * signed_right) << 1 >> bits, bits)
+        }
+        _ => return None,
+    })
+}
+
+fn variable_shift(
+    left: u64,
+    right: u64,
+    bits: u32,
+    signed: bool,
+    round: bool,
+    saturate: bool,
+) -> (u64, bool) {
+    let amount = (right as u8) as i8 as i32;
+    let value = if signed {
+        extend_element(left, bits, false)
+    } else {
+        extend_element(left, bits, true)
+    };
+    if amount >= 0 {
+        let amount = amount as u32;
+        if amount >= bits {
+            if !saturate || value == 0 {
+                return (0, saturate && value != 0);
+            }
+            return if signed && value < 0 {
+                (low_mask(bits) << (bits - 1) & low_mask(bits), true)
+            } else {
+                (low_mask(bits), true)
+            };
+        }
+        let shifted = value << amount;
+        return if saturate {
+            if signed {
+                signed_saturate(shifted, bits)
+            } else {
+                unsigned_saturate(shifted, bits)
+            }
+        } else {
+            (wrapping_element(shifted, bits), false)
+        };
+    }
+    let magnitude = amount.unsigned_abs();
+    if round {
+        // An i8 shift of -128 is the only count whose rounding bit does not
+        // fit as a positive i128. Every in-range element rounds to zero.
+        if magnitude >= 128 {
+            return (0, false);
+        }
+        let shifted = (value + (1i128 << (magnitude - 1))) >> magnitude;
+        return (wrapping_element(shifted, bits), false);
+    }
+    if magnitude >= bits {
+        let fill = if signed && value < 0 {
+            low_mask(bits)
+        } else {
+            0
+        };
+        return (fill, false);
+    }
+    (wrapping_element(value >> magnitude, bits), false)
+}
+
+fn simd_three_same_float(
+    vn: u128,
+    vm: u128,
+    vd: u128,
+    wide: bool,
+    unsigned: bool,
+    size: u32,
+    opcode: u32,
+    scalar: bool,
+    fpcr: u64,
+) -> Option<(u128, bool, u64)> {
+    let double = size & 1 != 0;
+    let alternate = size & 2 != 0;
+    let bits = if double { 64 } else { 32 };
+    if double && !wide && !scalar {
+        return None;
+    }
+    if scalar && !wide {
+        return None;
+    }
+    let lanes = if scalar {
+        1
+    } else {
+        (if wide { 128 } else { 64 }) / bits
+    };
+    let pairwise = matches!(
+        (opcode, unsigned, alternate),
+        (0x18, true, _) | (0x1a, true, false) | (0x1e, true, _)
+    );
+    let mut flags = 0u64;
+    let mut result = 0u128;
+    let operate = |left: u64, right: u64, prior: u64, flags: &mut u64| -> Option<u64> {
+        let (value, extra) = match (opcode, unsigned, alternate) {
+            (0x18, false, false) | (0x18, true, false) => {
+                scalar_float_minmax(left, right, double, true, false, fpcr)
+            }
+            (0x18, false, true) | (0x18, true, true) => {
+                scalar_float_minmax(left, right, double, true, true, fpcr)
+            }
+            (0x19, false, false) => {
+                crate::float_arithmetic::fused(left, right, prior, double, false, false, fpcr)
+            }
+            (0x19, false, true) => {
+                crate::float_arithmetic::fused(left, right, prior, double, true, false, fpcr)
+            }
+            (0x1a, true, false) => crate::float_arithmetic::binary(
+                left,
+                right,
+                double,
+                crate::float_arithmetic::Operation::Add,
+                fpcr,
+            ),
+            (0x1a, true, true) => {
+                let sign = 1u64 << if double { 63 } else { 31 };
+                let (value, extra) = crate::float_arithmetic::binary(
+                    left & !sign,
+                    right & !sign,
+                    double,
+                    crate::float_arithmetic::Operation::Subtract,
+                    fpcr,
+                );
+                (value & !sign, extra)
+            }
+            (0x1b, false, false) => float_mulx(left, right, double, fpcr),
+            (0x1c, false, false) => float_compare_mask(left, right, double, fpcr, bits, 0),
+            (0x1c, true, false) => float_compare_mask(left, right, double, fpcr, bits, 1),
+            (0x1c, true, true) => float_compare_mask(left, right, double, fpcr, bits, 2),
+            (0x1d, true, false) => float_compare_mask(
+                left & sign_clear(double),
+                right & sign_clear(double),
+                double,
+                fpcr,
+                bits,
+                1,
+            ),
+            (0x1d, true, true) => float_compare_mask(
+                left & sign_clear(double),
+                right & sign_clear(double),
+                double,
+                fpcr,
+                bits,
+                2,
+            ),
+            (0x1e, false, false) | (0x1e, true, false) => {
+                scalar_float_minmax(left, right, double, false, false, fpcr)
+            }
+            (0x1e, false, true) | (0x1e, true, true) => {
+                scalar_float_minmax(left, right, double, false, true, fpcr)
+            }
+            (0x1f, false, false) => float_reciprocal_step(left, right, double, fpcr, false),
+            (0x1f, false, true) => float_reciprocal_step(left, right, double, fpcr, true),
+            _ => return None,
+        };
+        *flags |= extra;
+        Some(value)
+    };
+    if pairwise {
+        let pairs = lanes / 2;
+        for index in 0..pairs {
+            let low = operate(
+                vector_element(vn, index * 2, bits),
+                vector_element(vn, index * 2 + 1, bits),
+                0,
+                &mut flags,
+            )?;
+            let high = operate(
+                vector_element(vm, index * 2, bits),
+                vector_element(vm, index * 2 + 1, bits),
+                0,
+                &mut flags,
+            )?;
+            result |= u128::from(low) << (index * bits);
+            result |= u128::from(high) << ((pairs + index) * bits);
+        }
+    } else {
+        for lane in 0..lanes {
+            let value = operate(
+                vector_element(vn, lane, bits),
+                vector_element(vm, lane, bits),
+                vector_element(vd, lane, bits),
+                &mut flags,
+            )?;
+            result |= u128::from(value) << (lane * bits);
+        }
+    }
+    Some((result, false, flags))
+}
+
+fn sign_clear(double: bool) -> u64 {
+    !(1u64 << if double { 63 } else { 31 })
+}
+
+fn float_compare_mask(
+    left: u64,
+    right: u64,
+    double: bool,
+    fpcr: u64,
+    bits: u32,
+    relation: u8,
+) -> (u64, u64) {
+    let (nzcv, flags) = crate::float_arithmetic::compare(left, right, double, false, fpcr);
+    let matched = match relation {
+        0 => nzcv == 6,
+        1 => matches!(nzcv, 2 | 6),
+        _ => nzcv == 2,
+    };
+    (if matched { low_mask(bits) } else { 0 }, flags)
+}
+
+fn float_mulx(left: u64, right: u64, double: bool, fpcr: u64) -> (u64, u64) {
+    let (sign, exponent, two) = if double {
+        (1u64 << 63, 0x7ff0_0000_0000_0000, 0x4000_0000_0000_0000)
+    } else {
+        (1u64 << 31, 0x7f80_0000, 0x4000_0000)
+    };
+    let zero = |value: u64| value & !sign == 0;
+    let infinite = |value: u64| value & !sign == exponent;
+    if (zero(left) && infinite(right)) || (infinite(left) && zero(right)) {
+        return (two | ((left ^ right) & sign), 0);
+    }
+    crate::float_arithmetic::binary(
+        left,
+        right,
+        double,
+        crate::float_arithmetic::Operation::Multiply,
+        fpcr,
+    )
+}
+
+fn float_reciprocal_step(left: u64, right: u64, double: bool, fpcr: u64, root: bool) -> (u64, u64) {
+    let (three_or_two, half) = if double {
+        (
+            if root {
+                0x4008_0000_0000_0000
+            } else {
+                0x4000_0000_0000_0000
+            },
+            0x3fe0_0000_0000_0000,
+        )
+    } else {
+        (if root { 0x4040_0000 } else { 0x4000_0000 }, 0x3f00_0000)
+    };
+    let (value, flags) =
+        crate::float_arithmetic::fused(left, right, three_or_two, double, true, false, fpcr);
+    if root {
+        let (value, more) = crate::float_arithmetic::binary(
+            value,
+            half,
+            double,
+            crate::float_arithmetic::Operation::Multiply,
+            fpcr,
+        );
+        (value, flags | more)
+    } else {
+        (value, flags)
+    }
+}
+
+/// SQSHL/UQSHL/SQSHLU, SHRN and the saturating narrow shifts, and vector
+/// SCVTF/FCVTZS with fbits. Half-precision element sizes stay rejected.
+fn simd_modified_immediate(
+    source: u128,
+    previous: u128,
+    insn: u32,
+    fpcr: u64,
+) -> Option<(u128, bool, u64)> {
+    let immediate = (insn >> 16) & 127;
+    if immediate < 8 {
+        return None;
+    }
+    let opcode = (insn >> 11) & 31;
+    let scalar = insn & (1 << 28) != 0;
+    let wide = insn & (1 << 30) != 0;
+    let unsigned = insn & (1 << 29) != 0;
+    if scalar && !wide {
+        return None;
+    }
+    let bits = 1u32 << (31 - immediate.leading_zeros());
+    if bits == 64 && !wide && !scalar {
+        return None;
+    }
+    let left = immediate - bits;
+    match opcode {
+        0x0c | 0x0e => {
+            if opcode == 0x0c && !unsigned {
+                return None;
+            }
+            let lanes = if scalar {
+                1
+            } else {
+                (if wide { 128 } else { 64 }) / bits
+            };
+            let mut result = 0u128;
+            let mut saturated = false;
+            for lane in 0..lanes {
+                let value = vector_element(source, lane, bits);
+                let shifted = if opcode == 0x0e && !unsigned {
+                    i128::from(sign_extend(value, bits)) << left
+                } else if opcode == 0x0c {
+                    i128::from(sign_extend(value, bits)) << left
+                } else {
+                    i128::from(value) << left
+                };
+                let (narrowed, clipped) = if opcode == 0x0e && !unsigned {
+                    signed_saturate(shifted, bits)
+                } else {
+                    unsigned_saturate(shifted, bits)
+                };
+                saturated |= clipped;
+                result |= u128::from(narrowed) << (lane * bits);
+            }
+            Some((result, saturated, 0))
+        }
+        0x10 | 0x11 | 0x12 | 0x13 => {
+            if bits >= 64 {
+                return None;
+            }
+            let shift = bits * 2 - immediate;
+            if shift == 0 {
+                return None;
+            }
+            let round = if opcode & 1 != 0 {
+                1i128 << (shift - 1)
+            } else {
+                0
+            };
+            let source_bits = bits * 2;
+            let lanes = if scalar { 1 } else { 64 / bits };
+            let mut packed = 0u64;
+            let mut saturated = false;
+            for lane in 0..lanes {
+                let value = vector_element(source, lane, source_bits);
+                // SHRN/RSHRN truncate. U=1 on those opcodes is signed-to-unsigned.
+                // U=1 on SQSHRN/SQRSHRN is the unsigned UQSHRN/UQRSHRN form.
+                let signed_input = match opcode {
+                    0x10 | 0x11 => unsigned,
+                    _ => !unsigned,
+                };
+                let extended = if signed_input {
+                    i128::from(sign_extend(value, source_bits))
+                } else {
+                    i128::from(value)
+                };
+                let shifted = (extended + round) >> shift;
+                let (narrowed, clipped) = match opcode {
+                    0x10 | 0x11 if !unsigned => (shifted as u64 & low_mask(bits), false),
+                    0x10 | 0x11 => unsigned_saturate(shifted, bits),
+                    0x12 | 0x13 if unsigned => unsigned_saturate(shifted, bits),
+                    _ => signed_saturate(shifted, bits),
+                };
+                saturated |= clipped;
+                packed |= (narrowed & low_mask(bits)) << (lane * bits);
+            }
+            let result = if wide && !scalar {
+                (previous & u128::from(u64::MAX)) | (u128::from(packed) << 64)
+            } else {
+                u128::from(packed)
+            };
+            Some((result, saturated, 0))
+        }
+        0x1c | 0x1f => {
+            if !matches!(bits, 32 | 64) {
+                return None;
+            }
+            let fbits = bits * 2 - immediate;
+            let double = bits == 64;
+            let lanes = if scalar {
+                1
+            } else {
+                (if wide { 128 } else { 64 }) / bits
+            };
+            let mut result = 0u128;
+            let mut flags = 0u64;
+            for lane in 0..lanes {
+                let value = vector_element(source, lane, bits);
+                let (converted, extra) = if opcode == 0x1c {
+                    crate::float_convert::fixed_integer_to_float(
+                        value, double, !unsigned, double, fbits, fpcr,
+                    )
+                } else {
+                    crate::float_convert::float_to_fixed(
+                        value, double, double, !unsigned, fbits, fpcr,
+                    )
+                };
+                result |= u128::from(converted & low_mask(bits)) << (lane * bits);
+                flags |= extra;
+            }
+            Some((result, false, flags))
+        }
+        _ => None,
+    }
+}
+
+// `size` is the narrow element width. Long results replace Vd. Narrow-high
+// results replace one 64-bit half selected by `upper` and keep the other.
+fn broadcast_element(element: u64, bits: u32) -> u128 {
+    let piece = u128::from(element & low_mask(bits));
+    let mut value = 0u128;
+    let mut lane = 0u32;
+    while lane < 128 / bits {
+        value |= piece << (lane * bits);
+        lane += 1;
+    }
+    value
+}
+
+/// AdvSIMD MUL/MLA/MLS, widening long multiplies, SQDMULH, and FMLA/FMLS/FMULX
+/// by element. The indexed lane is broadcast, then the three-register helpers
+/// apply the same lane arithmetic. FEAT_RDM (`sqrdmulh`) stays rejected.
+fn simd_by_element(
+    vn: u128,
+    vm: u128,
+    vd: u128,
+    insn: u32,
+    fpcr: u64,
+) -> Option<(u128, bool, u64)> {
+    let wide = insn & (1 << 30) != 0;
+    let unsigned = insn & (1 << 29) != 0;
+    let scalar = insn & (1 << 28) != 0;
+    let size = (insn >> 22) & 3;
+    if size == 0 {
+        return None;
+    }
+    let low = (insn >> 21) & 1;
+    let element_bit = (insn >> 20) & 1;
+    let opcode = (insn >> 12) & 15;
+    let high = (insn >> 11) & 1;
+    if size == 3 && low != 0 {
+        return None;
+    }
+    let bits = 8u32 << size;
+    let index = match size {
+        1 => (high << 2) | (low << 1) | element_bit,
+        2 => (high << 1) | low,
+        _ => high,
+    };
+    let broadcast = broadcast_element(vector_element(vm, index, bits), bits);
+    let long = matches!(opcode, 2 | 3 | 6 | 7 | 10 | 11);
+    if long {
+        if size == 3 || scalar && !wide {
+            return None;
+        }
+        let (widen_unsigned, widen_opcode) = match (unsigned, opcode) {
+            (false, 2) => (false, 8),
+            (true, 2) => (true, 8),
+            (false, 6) => (false, 0xa),
+            (true, 6) => (true, 0xa),
+            (false, 10) => (false, 0xc),
+            (true, 10) => (true, 0xc),
+            (false, 3) => (false, 9),
+            (false, 7) => (false, 0xb),
+            (false, 11) => (false, 0xd),
+            _ => return None,
+        };
+        let (result, saturated) = simd_three_different(
+            vn,
+            broadcast,
+            vd,
+            size,
+            wide && !scalar,
+            widen_unsigned,
+            widen_opcode,
+        )?;
+        if scalar {
+            let wide_bits = bits * 2;
+            return Some((
+                u128::from((result as u64) & low_mask(wide_bits)),
+                saturated,
+                0,
+            ));
+        }
+        return Some((result, saturated, 0));
+    }
+    if size == 3 && !matches!(opcode, 1 | 5 | 9) {
+        return None;
+    }
+    match opcode {
+        8 if !unsigned => simd_three_same(vn, broadcast, vd, wide, false, size, 0x13, scalar, fpcr),
+        0 if unsigned => simd_three_same(vn, broadcast, vd, wide, false, size, 0x12, scalar, fpcr),
+        4 if unsigned => simd_three_same(vn, broadcast, vd, wide, true, size, 0x12, scalar, fpcr),
+        12 if !unsigned && matches!(size, 1 | 2) => {
+            simd_three_same(vn, broadcast, vd, wide, false, size, 0x16, scalar, fpcr)
+        }
+        1 | 5 if !unsigned && size >= 2 => {
+            let packed = (u32::from(opcode == 5) << 1) | u32::from(size == 3);
+            simd_three_same(vn, broadcast, vd, wide, false, packed, 0x19, scalar, fpcr)
+        }
+        9 if size >= 2 => {
+            if unsigned {
+                let packed = u32::from(size == 3);
+                simd_three_same(vn, broadcast, vd, wide, false, packed, 0x1b, scalar, fpcr)
+            } else {
+                let double = size == 3;
+                if double && !wide && !scalar || scalar && !wide {
+                    return None;
+                }
+                let lanes = if scalar {
+                    1
+                } else {
+                    (if wide { 128 } else { 64 }) / bits
+                };
+                let mut result = 0u128;
+                let mut flags = 0u64;
+                let right = vector_element(broadcast, 0, bits);
+                for lane in 0..lanes {
+                    let (value, extra) = crate::float_arithmetic::binary(
+                        vector_element(vn, lane, bits),
+                        right,
+                        double,
+                        crate::float_arithmetic::Operation::Multiply,
+                        fpcr,
+                    );
+                    result |= u128::from(value) << (lane * bits);
+                    flags |= extra;
+                }
+                Some((result, false, flags))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn simd_three_different(
+    vn: u128,
+    vm: u128,
+    vd: u128,
+    size: u32,
+    upper: bool,
+    unsigned: bool,
+    opcode: u32,
+) -> Option<(u128, bool)> {
+    if size == 3 {
+        if opcode == 0xe && !unsigned {
+            let lane = u32::from(upper);
+            return Some((
+                polynomial_product(
+                    vector_element(vn, lane, 64),
+                    vector_element(vm, lane, 64),
+                    64,
+                ),
+                false,
+            ));
+        }
+        return None;
+    }
+    if size > 2 || opcode > 14 {
+        return None;
+    }
+    let saturating = matches!(opcode, 0x9 | 0xb | 0xd);
+    if opcode == 0xe && unsigned || saturating && (unsigned || size == 0) {
+        return None;
+    }
+    let narrow = 8u32 << size;
+    let wide = narrow * 2;
+    let elements = 64 / narrow;
+    let part = if upper { elements } else { 0 };
+    if matches!(opcode, 0x4 | 0x6) {
+        let mut packed = 0u64;
+        let round = if unsigned { 1u128 << (narrow - 1) } else { 0 };
+        for lane in 0..elements {
+            let left = u128::from(vector_element(vn, lane, wide));
+            let right = u128::from(vector_element(vm, lane, wide));
+            let high = if opcode == 0x4 {
+                (left + right + round) >> narrow
+            } else {
+                ((left as i128 - right as i128 + round as i128) >> narrow) as u128
+            };
+            packed |= ((high as u64) & low_mask(narrow)) << (lane * narrow);
+        }
+        let merged = if upper {
+            (vd & u128::from(u64::MAX)) | (u128::from(packed) << 64)
+        } else {
+            u128::from(packed)
+        };
+        return Some((merged, false));
+    }
+    let mut result = 0u128;
+    let mut saturated = false;
+    for lane in 0..elements {
+        let left_narrow = vector_element(vn, part + lane, narrow);
+        let right_narrow = vector_element(vm, part + lane, narrow);
+        let left_wide = vector_element(vn, lane, wide);
+        let accumulator = vector_element(vd, lane, wide);
+        let left = extend_element(left_narrow, narrow, unsigned);
+        let right = extend_element(right_narrow, narrow, unsigned);
+        let product = left * right;
+        let difference = left - right;
+        let magnitude = if difference < 0 {
+            -difference
+        } else {
+            difference
+        };
+        let (value, clipped) = match opcode {
+            0 | 2 => (
+                wrapping_element(
+                    extend_element(left_narrow, narrow, unsigned)
+                        + if opcode == 0 { right } else { -right },
+                    wide,
+                ),
+                false,
+            ),
+            1 | 3 => (
+                wrapping_element(
+                    extend_element(left_wide, wide, unsigned)
+                        + if opcode == 1 {
+                            extend_element(right_narrow, narrow, unsigned)
+                        } else {
+                            -extend_element(right_narrow, narrow, unsigned)
+                        },
+                    wide,
+                ),
+                false,
+            ),
+            5 | 7 => {
+                let total = if opcode == 5 {
+                    u128::from(accumulator) + (magnitude as u128)
+                } else {
+                    magnitude as u128
+                };
+                (total as u64 & low_mask(wide), false)
+            }
+            8 | 0xa => (
+                wrapping_element(
+                    i128::from(accumulator) + if opcode == 8 { product } else { -product },
+                    wide,
+                ),
+                false,
+            ),
+            0xc => (wrapping_element(product, wide), false),
+            0x9 | 0xb | 0xd => {
+                let (doubled, doubled_sat) = signed_saturate(product * 2, wide);
+                if opcode == 0xd {
+                    (doubled, doubled_sat)
+                } else {
+                    let accumulator = i128::from(sign_extend(accumulator, wide));
+                    let exact = if opcode == 0x9 {
+                        accumulator + i128::from(sign_extend(doubled, wide))
+                    } else {
+                        accumulator - i128::from(sign_extend(doubled, wide))
+                    };
+                    let (value, clipped) = signed_saturate(exact, wide);
+                    (value, doubled_sat || clipped)
+                }
+            }
+            0xe => (
+                polynomial_product(left_narrow, right_narrow, narrow) as u64 & low_mask(wide),
+                false,
+            ),
+            _ => return None,
+        };
+        saturated |= clipped;
+        result |= u128::from(value) << (lane * wide);
+    }
+    Some((result, saturated))
+}
+
+#[cfg(kani)]
+#[kani::proof]
+fn umull_low_byte_is_widening_product() {
+    let left: u8 = kani::any();
+    let right: u8 = kani::any();
+    let (result, saturated) =
+        simd_three_different(u128::from(left), u128::from(right), 0, 0, false, true, 0xc).unwrap();
+    assert!(!saturated);
+    assert_eq!(result, u128::from(u16::from(left) * u16::from(right)));
 }
 
 fn low_mask(bits: u32) -> u64 {
@@ -5004,6 +6277,49 @@ mod tests {
     }
 
     #[test]
+    fn shll_moves_each_byte_into_the_high_half_of_a_halfword() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory
+            .write(0, &0x2e21_3bffu32.to_le_bytes())
+            .unwrap(); // SHLL V31.8H,V31.8B,#8
+        memory
+            .write(4, &0x6e21_3862u32.to_le_bytes())
+            .unwrap(); // SHLL2 V2.8H,V3.16B,#8
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.v[31] = 0x2010_027f_00ff_8001;
+        cpu.step().unwrap();
+        assert_eq!(
+            cpu.v[31],
+            0x2000_1000_0200_7f00_0000_ff00_8000_0100
+        );
+
+        cpu.v[3] = 0xff02_8001_0000_0000_1111_1111_1111_1111;
+        cpu.step().unwrap();
+        assert_eq!(cpu.v[2], 0xff00_0200_8000_0100_0000_0000_0000_0000);
+        assert_eq!(cpu.v[3], 0xff02_8001_0000_0000_1111_1111_1111_1111);
+    }
+
+    #[test]
+    fn umull_eight_bytes_widens_the_low_half() {
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &0x2e24_c308u32.to_le_bytes()).unwrap(); // UMULL V8.8H,V24.8B,V4.8B
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.v[24] = 0x0201_00ff_8000_7fff;
+        cpu.v[4] = 0x0300_0002_0202_0202;
+        cpu.v[8] = u128::MAX;
+        cpu.step().unwrap();
+        let mut expected = 0u128;
+        for lane in 0..8 {
+            let left = super::vector_element(0x0201_00ff_8000_7fff, lane, 8) as u16;
+            let right = super::vector_element(0x0300_0002_0202_0202, lane, 8) as u16;
+            expected |= u128::from(left * right) << (lane * 16);
+        }
+        assert_eq!(cpu.v[8], expected);
+        assert_eq!(cpu.v[24], 0x0201_00ff_8000_7fff);
+        assert_eq!(cpu.pc, 4);
+    }
+
+    #[test]
     fn simd_dup_broadcasts_general_register_word() {
         let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
         memory.write(0, &0x4e04_0c40u32.to_le_bytes()).unwrap(); // DUP V0.4S,W2
@@ -5850,6 +7166,41 @@ mod tests {
         assert_eq!(cpu.x(30), 4);
         cpu.step().unwrap();
         assert_eq!(cpu.pc, 4);
+    }
+
+    /// One-shot inventory. Set `RELAY_ISA_WORDS` to a file of hex instruction
+    /// words from the Armv8.0 profile. Prints every word `step` still rejects.
+    #[test]
+    fn profile_words_are_implemented() {
+        let Ok(path) = std::env::var("RELAY_ISA_WORDS") else {
+            return;
+        };
+        let words = std::fs::read_to_string(path).unwrap();
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 4096).unwrap();
+        memory.write(0, &[0u8; 4]).unwrap();
+        let mut cpu = StaticCpu::new(memory, 0).unwrap();
+        cpu.sp = 0x200;
+        let mut missing = 0u32;
+        for line in words.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let word = u32::from_str_radix(line, 16).unwrap();
+            cpu.memory.write(0, &word.to_le_bytes()).unwrap();
+            cpu.pc = 0;
+            cpu.sysregs.current_el = 1;
+            if let Err(error) = cpu.step() {
+                if error.to_string().contains("unimplemented") {
+                    missing += 1;
+                    println!("missing {word:08x} {error}");
+                }
+            }
+        }
+        assert_eq!(
+            missing, 0,
+            "{missing} advertised-profile instructions are unimplemented"
+        );
     }
 }
 

@@ -137,6 +137,13 @@ pub fn build(
     prop_cells(&mut st, &mut strings, "interrupts", &[0, 36, 4]);
     end_node(&mut st);
 
+    // Userspace NAT. Linux names this eth0. The guest address is 10.0.2.15.
+    node(&mut st, "virtio_mmio@a003000");
+    prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
+    prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_3000, 0, 0x1000]);
+    prop_cells(&mut st, &mut strings, "interrupts", &[0, 35, 4]);
+    end_node(&mut st);
+
     end_node(&mut st);
     be(&mut st, END);
     let off_struct = 56u32;
@@ -240,6 +247,7 @@ mod tests {
             b"arm,armv8-timer",
             b"arm,pl011",
             b"virtio,mmio",
+            b"virtio_mmio@a003000",
             b"linux,initrd-start",
         ] {
             assert!(dtb.windows(expected.len()).any(|window| window == expected));

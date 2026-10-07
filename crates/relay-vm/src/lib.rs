@@ -1,5 +1,7 @@
 //! Linux VM start/stop. Containers always sit on this backend.
 
+mod aot;
+pub use aot::ram_span_ok;
 mod boot_trace;
 mod bus;
 mod cpu;
@@ -11,7 +13,10 @@ mod exception;
 mod float_arithmetic;
 mod float_convert;
 mod guest;
+mod guest_session;
 mod host_waypipe;
+mod shm_import;
+mod session_auth_host;
 mod linux_boot;
 mod mmu;
 mod nixos_generations;
@@ -21,15 +26,30 @@ mod storage;
 mod stream_bridge;
 mod sysregs;
 mod timer;
+mod net_frame;
+#[cfg(not(kani))]
+mod net_host;
+pub use bus::net_irq_iars;
+#[cfg(not(kani))]
+pub use net_host::{nat_counters, nat_io_counters};
+#[cfg(not(kani))]
+pub use virtio_net::rx_counters;
 mod virtio_block;
 mod virtio_console;
 mod virtio_mmio;
+mod virtio_net;
 mod virtio_vsock;
 mod vsock;
 mod vsock_wire;
 
 pub use guest::GuestMemory;
+pub use guest_session::{
+    frame_hash, verify_response, SessionChallenge, SessionKey, SessionResponse,
+    CONTROL_VSOCK_PORT, PROTOCOL_VERSION,
+};
 pub use host_waypipe::HostWaypipeEntry;
+pub use shm_import::ImportedFrame;
+pub use session_auth_host::{AuthListener, AuthenticatedReady};
 pub use nixos_generations::generations_json;
 pub use page_translate::PageTranslate;
 pub use stream_bridge::{BridgeProgress, StreamBridge};
@@ -76,7 +96,6 @@ static NEXT_VZ_SESSION: AtomicU64 = AtomicU64::new(1);
 static NEXT_STATIC_SESSION: AtomicU64 = AtomicU64::new(1);
 static STATIC_SESSIONS: OnceLock<Mutex<BTreeMap<String, StaticSession>>> = OnceLock::new();
 
-#[cfg_attr(test, derive(Default))]
 struct StaticSession {
     // Keep exclusive machine storage until its native worker also stops.
     _disk_guard: Option<std::fs::File>,
@@ -85,6 +104,9 @@ struct StaticSession {
     console: Arc<Mutex<Vec<u8>>>,
     vsock_connections: Option<std::sync::mpsc::Receiver<VsockConnection>>,
     host_waypipe: Option<host_waypipe::Worker>,
+    shm_importer: Option<shm_import::Importer>,
+    imported_frame: Arc<Mutex<Option<ImportedFrame>>>,
+    auth_listener: Option<AuthListener>,
     pc: Arc<AtomicU64>,
     physical_pc: Arc<AtomicU64>,
     instructions: Arc<AtomicU64>,
@@ -127,6 +149,65 @@ struct StaticSession {
     console_tx_notifications: Arc<AtomicU64>,
     console_tx_completions: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl Default for StaticSession {
+    fn default() -> Self {
+        Self {
+            _disk_guard: None,
+            stop: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(AtomicU8::new(0)),
+            console: Arc::new(Mutex::new(Vec::new())),
+            vsock_connections: None,
+            host_waypipe: None,
+            shm_importer: None,
+            imported_frame: Arc::new(Mutex::new(None)),
+            auth_listener: None,
+            pc: Arc::new(AtomicU64::new(0)),
+            physical_pc: Arc::new(AtomicU64::new(0)),
+            instructions: Arc::new(AtomicU64::new(0)),
+            x0: Arc::new(AtomicU64::new(0)),
+            x1: Arc::new(AtomicU64::new(0)),
+            x3: Arc::new(AtomicU64::new(0)),
+            x30: Arc::new(AtomicU64::new(0)),
+            lock_byte: Arc::new(AtomicU8::new(0xff)),
+            lock_writer_pc: Arc::new(AtomicU64::new(0)),
+            lock_writer_value: Arc::new(AtomicU64::new(0)),
+            lock_writer_bytes: Arc::new(AtomicU8::new(0)),
+            lock_prior_writer_pc: Arc::new(AtomicU64::new(0)),
+            lock_prior_writer_value: Arc::new(AtomicU64::new(0)),
+            lock_prior_writer_bytes: Arc::new(AtomicU8::new(0)),
+            last_abort_pc: Arc::new(AtomicU64::new(0)),
+            last_abort_insn: Arc::new(AtomicU64::new(0)),
+            last_abort_prior_pc: Arc::new(AtomicU64::new(0)),
+            last_abort_prior_insn: Arc::new(AtomicU64::new(0)),
+            last_abort_address: Arc::new(AtomicU64::new(0)),
+            last_abort_esr: Arc::new(AtomicU64::new(0)),
+            last_abort_x0: Arc::new(AtomicU64::new(0)),
+            last_abort_x1: Arc::new(AtomicU64::new(0)),
+            last_abort_x2: Arc::new(AtomicU64::new(0)),
+            last_abort_x3: Arc::new(AtomicU64::new(0)),
+            last_abort_x30: Arc::new(AtomicU64::new(0)),
+            last_abort_sp: Arc::new(AtomicU64::new(0)),
+            abort_count: Arc::new(AtomicU64::new(0)),
+            mmio_reads: Arc::new(AtomicU64::new(0)),
+            mmio_writes: Arc::new(AtomicU64::new(0)),
+            pl011_writes: Arc::new(AtomicU64::new(0)),
+            last_mmio_read: Arc::new(AtomicU64::new(0)),
+            last_mmio_write: Arc::new(AtomicU64::new(0)),
+            gicc_iar_reads: Arc::new(AtomicU64::new(0)),
+            gicc_spurious_reads: Arc::new(AtomicU64::new(0)),
+            gicc_eoir_writes: Arc::new(AtomicU64::new(0)),
+            last_irq_ack: Arc::new(AtomicU64::new(0)),
+            last_irq_eoi: Arc::new(AtomicU64::new(0)),
+            console_rx_notifications: Arc::new(AtomicU64::new(0)),
+            console_rx_completions: Arc::new(AtomicU64::new(0)),
+            console_tx_notifications: Arc::new(AtomicU64::new(0)),
+            console_tx_completions: Arc::new(AtomicU64::new(0)),
+            thread: None,
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -234,6 +315,7 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
     };
     let (mut cpu, _) = linux_boot::create_cpu_with_disk(&manifest, Some(disk))?;
     let vsock_connections = cpu.listen_vsock(WAYPIPE_VSOCK_PORT)?;
+    let auth_connections = cpu.listen_vsock(CONTROL_VSOCK_PORT)?;
     let mut boot_trace = trace_path
         .as_deref()
         .and_then(|path| boot_trace::BootTrace::open(path, manifest.memory_bytes, disk_gib));
@@ -469,6 +551,28 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
             thread_state.store(1, Ordering::Release);
         })
         .map_err(|error| RelayError::Failed(format!("cannot start StaticCpu thread: {error}")))?;
+    let mut seed = [0u8; 32];
+    fill_os_random(&mut seed)?;
+    let mut nonce = [0u8; 32];
+    fill_os_random(&mut nonce)?;
+    let machine_id = spec
+        .machine_id
+        .clone()
+        .unwrap_or_else(|| id.clone());
+    let key = SessionKey::derive(&seed, &manifest.kernel.sha256, &manifest.rootfs.sha256);
+    let challenge = SessionChallenge::new(
+        machine_id,
+        id.clone(),
+        manifest.kernel.sha256.clone(),
+        manifest.rootfs.sha256.clone(),
+        nonce,
+    );
+    let auth_listener = AuthListener::serve_connection(
+        auth_connections,
+        key,
+        challenge,
+        Arc::clone(&stop),
+    );
     STATIC_SESSIONS
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
@@ -482,6 +586,9 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
                 console,
                 vsock_connections: Some(vsock_connections),
                 host_waypipe: None,
+                shm_importer: None,
+                imported_frame: Arc::new(Mutex::new(None)),
+                auth_listener: Some(auth_listener),
                 pc,
                 physical_pc,
                 instructions,
@@ -888,6 +995,13 @@ pub fn stop(handle: &str) -> Result<(), RelayError> {
                         ));
                     }
                 }
+                if let Some(importer) = &mut session.shm_importer {
+                    if !importer.join_until(deadline)? {
+                        return Err(RelayError::Failed(
+                            "shm import stop pending; session retained for retry".into(),
+                        ));
+                    }
+                }
                 Ok(())
             })();
             // Keep the session visible and disk exclusively owned throughout
@@ -1047,6 +1161,76 @@ pub fn host_waypipe_last_exit(handle: &str) -> Result<Option<i32>, RelayError> {
         .host_waypipe
         .as_ref()
         .and_then(host_waypipe::Worker::last_exit))
+}
+
+/// Attach the SHM importer to guest waypipe vsock 1024. Native `start_host_waypipe`
+/// cannot run on the same session: both consume that listener.
+pub fn start_shm_importer(handle: &str) -> Result<(), RelayError> {
+    let sessions = STATIC_SESSIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut sessions = sessions
+        .lock()
+        .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?;
+    let session = sessions
+        .get_mut(handle)
+        .ok_or_else(|| RelayError::Failed("Relay StaticCpu session not found".into()))?;
+    if session.stop.load(Ordering::Acquire) || session.state.load(Ordering::Acquire) != 0 {
+        return Err(RelayError::Failed(
+            "Relay StaticCpu session is stopping or exited".into(),
+        ));
+    }
+    let connections = session
+        .vsock_connections
+        .take()
+        .ok_or_else(|| RelayError::Failed("Relay host waypipe is already attached".into()))?;
+    let frame = Arc::clone(&session.imported_frame);
+    let importer = shm_import::Importer::start(
+        connections,
+        Arc::clone(&session.stop),
+        Arc::clone(&session.state),
+        frame,
+    )?;
+    session.shm_importer = Some(importer);
+    Ok(())
+}
+
+/// Guest SHM pixels imported from waypipe BUFFER_FILL + wl_surface.commit.
+pub fn take_imported_frame(handle: &str) -> Result<Option<ImportedFrame>, RelayError> {
+    let sessions = STATIC_SESSIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let sessions = sessions
+        .lock()
+        .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?;
+    let session = sessions
+        .get(handle)
+        .ok_or_else(|| RelayError::Failed("Relay StaticCpu session not found".into()))?;
+    session
+        .imported_frame
+        .lock()
+        .map(|guard| guard.clone())
+        .map_err(|_| RelayError::Failed("Relay imported frame lock is poisoned".into()))
+}
+
+/// Authenticated guest READY on vsock 1025, if the HMAC exchange completed.
+pub fn take_authenticated_ready(handle: &str) -> Result<Option<AuthenticatedReady>, RelayError> {
+    let sessions = STATIC_SESSIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let sessions = sessions
+        .lock()
+        .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?;
+    let session = sessions
+        .get(handle)
+        .ok_or_else(|| RelayError::Failed("Relay StaticCpu session not found".into()))?;
+    Ok(session
+        .auth_listener
+        .as_ref()
+        .and_then(AuthListener::peek_ready))
+}
+
+fn fill_os_random(out: &mut [u8]) -> Result<(), RelayError> {
+    let mut file = fs::File::open("/dev/urandom")
+        .map_err(|e| RelayError::Failed(format!("cannot open /dev/urandom: {e}")))?;
+    use std::io::Read;
+    file.read_exact(out)
+        .map_err(|e| RelayError::Failed(format!("cannot read /dev/urandom: {e}")))?;
+    Ok(())
 }
 
 pub fn console_log(handle: &str) -> Result<Vec<u8>, RelayError> {

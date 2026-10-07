@@ -89,10 +89,11 @@ pub fn prepare_linux_boot(
         _ => None,
     };
     let dtb_address = GUEST_RAM_BASE + DTB_OFFSET;
+    let command_line = with_slirp_address(&manifest.command_line);
     let dtb = dtb::build(
         GUEST_RAM_BASE,
         manifest.memory_bytes,
-        &manifest.command_line,
+        &command_line,
         initrd_range,
     )?;
     if dtb_address + dtb.len() as u64 > kernel_address {
@@ -107,10 +108,25 @@ pub fn prepare_linux_boot(
             entry_pc: kernel_address,
             dtb_address,
             initrd_address,
-            command_line: manifest.command_line.clone(),
+            command_line,
             dtb_bytes: dtb.len(),
         },
     ))
+}
+
+fn with_slirp_address(command_line: &str) -> String {
+    const SLIRP: &str = "ip=10.0.2.15::10.0.2.2:255.255.255.0::eth0:off:10.0.2.3";
+    if command_line
+        .split_whitespace()
+        .any(|arg| arg.starts_with("ip="))
+    {
+        return command_line.to_string();
+    }
+    if command_line.is_empty() {
+        SLIRP.to_string()
+    } else {
+        format!("{command_line} {SLIRP}")
+    }
 }
 
 #[allow(dead_code)]

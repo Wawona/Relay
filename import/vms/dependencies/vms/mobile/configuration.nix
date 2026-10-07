@@ -5,8 +5,11 @@
   imports = [ ./relay.nix ];
   networking.hostName = "wawona-mobile-guest";
   system.stateVersion = "24.11";
-  environment.systemPackages = with pkgs; [ cage foot wayland-utils ];
+  environment.systemPackages = with pkgs; [ cage foot wayland-utils weston ];
+  # Cage+foot needs a full nested compositor. The SHM acceptance frame is
+  # weston-simple-shm over waypipe --no-gpu. A cage swapchain miss is not
+  # a frame.
   wawona.relay.sessionCommand = [
-    "${pkgs.cage}/bin/cage" "--" "${pkgs.foot}/bin/foot"
+    "${pkgs.weston}/bin/weston-presentation-shm"
   ];
 }

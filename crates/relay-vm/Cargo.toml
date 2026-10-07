@@ -16,10 +16,14 @@ thiserror = "2"
 
 [dev-dependencies]
 relay-oci = { path = "../relay-oci" }
+proptest = "1.6"
 
 [features]
 default = []
 kernel-probe = []
+# Offline translator. Not a default feature, so the store staticlib does
+# not include it. The runtime in `aot` still loads a signed image.
+aot-translate = []
 fuzzing = []
 ios-hv = ["relay-core/ios-hv"]
 

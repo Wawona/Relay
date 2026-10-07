@@ -7,6 +7,10 @@ members = [
   "crates/relay-ffi",
   "crates/relay-bench",
 ]
+exclude = [
+  "verification/loom-lifecycle",
+  "fuzz",
+]
 resolver = "2"
 
 [workspace.package]

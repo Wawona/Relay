@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("usage: static_smoke GUEST_DIRECTORY [SECONDS] [--vsock-probe]".into())
         }
     };
+    let mut authenticated = None;
     if arguments.next().is_some() {
         return Err("usage: static_smoke GUEST_DIRECTORY [SECONDS] [--vsock-probe]".into());
     }
@@ -53,16 +54,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kind: RelayKind::Vm,
         platform: RelayPlatform::Ios,
         artifact: ArtifactClass::ModeA,
-        machine_id: Some("static-smoke".into()),
+        machine_id: Some(
+            env::var("WAWONA_SMOKE_MACHINE_ID").unwrap_or_else(|_| "static-smoke".into()),
+        ),
         image: None,
         memory_mb: Some((manifest.memory_bytes / (1024 * 1024)) as u32),
-        disk_gib: None,
+        disk_gib: env::var("WAWONA_SMOKE_DISK_GIB")
+            .ok()
+            .and_then(|value| value.parse().ok()),
         max_disk_gib: None,
         guest_page_size: Some(manifest.page_size),
         guest: Some(manifest),
         resources: Some(RelayRuntimeResources {
             launcher: String::new(),
-            state_directory: String::new(),
+            state_directory: env::var("WAWONA_SMOKE_STATE_DIR").unwrap_or_default(),
             guest_directory: Some(guest_directory.display().to_string()),
             trusted_guest_keys: Default::default(),
             allow_unsigned_guest: true,
@@ -74,6 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let handle = relay_vm::start(&spec)?;
     println!("Relay static guest started: {}", handle.id);
+    if !vsock_probe {
+        relay_vm::start_shm_importer(&handle.id)?;
+    }
+    let mut imported = None;
     let deadline = Instant::now() + Duration::from_secs(seconds);
     // Diagnostic only: observe real guest bytes without simulating waypipe or
     // publishing readiness. Retain at most the device's 16 bounded streams.
@@ -118,7 +127,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprint!("{}", String::from_utf8_lossy(&console[emitted_console..]));
                 emitted_console = console.len();
             }
-            if console_failure(&console).is_some() {
+            if console_failure(&console).is_some()
+                || console
+                    .windows(b"wawona-fastfetch: end".len())
+                    .any(|window| window == b"wawona-fastfetch: end")
+            {
                 break;
             }
             next_console_poll = Instant::now() + Duration::from_millis(250);
@@ -141,10 +154,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tx_notify,
                 tx_complete,
             ) = relay_vm::static_device_progress(&handle.id)?;
+            let (syn, conn_ok, conn_fail, synack_ok, synack_drop, rst) =
+                relay_vm::nat_counters();
+            let (host_tx, host_rx) = relay_vm::nat_io_counters();
+            let (rx_del, rx_nobuf, rx_small) = relay_vm::rx_counters();
+            let iar67 = relay_vm::net_irq_iars();
             eprintln!(
-                "Relay static heartbeat: instructions={instructions} pc={pc:#x}/{physical_pc:#x} mmio={reads}/{writes} last={last_read:#x}/{last_write:#x} gicc={iar}/{spurious}/{eoir} irq={irq}/{eoi} console-rx={rx_notify}/{rx_complete} console-tx={tx_notify}/{tx_complete}"
+                "Relay static heartbeat: instructions={instructions} pc={pc:#x}/{physical_pc:#x} mmio={reads}/{writes} last={last_read:#x}/{last_write:#x} gicc={iar}/{spurious}/{eoir} irq={irq}/{eoi} iar67={iar67} console-rx={rx_notify}/{rx_complete} console-tx={tx_notify}/{tx_complete} nat=syn:{syn}/ok:{conn_ok}/fail:{conn_fail}/synack:{synack_ok}/drop:{synack_drop}/rst:{rst}/htx:{host_tx}/hrx:{host_rx} rx=del:{rx_del}/nobuf:{rx_nobuf}/small:{rx_small}"
             );
             next_progress_poll = Instant::now() + Duration::from_secs(30);
+        }
+        if authenticated.is_none() {
+            if let Some(ready) = relay_vm::take_authenticated_ready(&handle.id)? {
+                eprintln!(
+                    "Relay authenticated session: machine={} session={} unit={}",
+                    ready.machine_id, ready.session_id, ready.unit_state
+                );
+                authenticated = Some(ready);
+            }
+        }
+        if imported.is_none() {
+            if let Some(frame) = relay_vm::take_imported_frame(&handle.id)? {
+                eprintln!(
+                    "Relay imported SHM frame: {}x{} sha256={}",
+                    frame.width,
+                    frame.height,
+                    frame.sha256.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
+                imported = Some(frame);
+            }
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -213,6 +251,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Relay static guest exited before smoke deadline".into());
     }
     println!("Relay static guest remained live for {seconds}s");
+    if let Some(ready) = authenticated {
+        println!(
+            "Relay authenticated ready machine={} unit={}",
+            ready.machine_id, ready.unit_state
+        );
+    }
+    if let Some(frame) = imported {
+        println!(
+            "Relay imported SHM frame {}x{} sha256={}",
+            frame.width,
+            frame.height,
+            frame.sha256.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+    }
     Ok(())
 }
 

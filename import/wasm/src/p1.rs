@@ -50,7 +50,9 @@ fn load_module(engine: &Engine, path: &Path) -> Result<Module> {
     let len = meta.len();
     let cacheable = crate::is_shared_engine(engine);
     if cacheable {
-        let guard = module_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = module_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(cached) = guard.as_ref() {
             if cached.path == path && cached.modified == modified && cached.len == len {
                 return Ok(cached.module.clone());
@@ -113,17 +115,13 @@ pub fn run(engine: &Engine, path: &std::path::Path, args: &[String]) -> Result<i
     );
     // Instantiation spends fuel. Arm again immediately before `_start` so
     // the first Wayland frame is not paying for module load.
-    store
-        .set_fuel(crate::sandbox::fuel_budget())
-        .ok();
+    store.set_fuel(crate::sandbox::fuel_budget()).ok();
     let _session = crate::interrupt::RunSession::begin(engine, &mut store);
 
     let instance = linker
         .instantiate(&mut store, &module)
         .context("instantiate P1")?;
-    store
-        .set_fuel(crate::sandbox::fuel_budget())
-        .ok();
+    store.set_fuel(crate::sandbox::fuel_budget()).ok();
     let start = instance
         .get_typed_func::<(), ()>(&mut store, "_start")
         .context("missing _start")?;

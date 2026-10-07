@@ -151,6 +151,18 @@ pub(crate) fn integer_to_float(
     double: bool,
     fpcr: u64,
 ) -> (u64, u64) {
+    fixed_integer_to_float(input, wide, signed, double, 0, fpcr)
+}
+
+/// Integer to S/D with `fbits` fractional bits. `fbits == 0` is SCVTF/UCVTF.
+pub(crate) fn fixed_integer_to_float(
+    input: u64,
+    wide: bool,
+    signed: bool,
+    double: bool,
+    fbits: u32,
+    fpcr: u64,
+) -> (u64, u64) {
     let input = if wide { input } else { u64::from(input as u32) };
     let signed_value = if wide {
         input as i64
@@ -167,14 +179,78 @@ pub(crate) fn integer_to_float(
         return (0, 0);
     }
     let fraction_bits = if double { 52 } else { 23 };
-    let bias = if double { 1023 } else { 127 };
+    let bias = if double { 1023i32 } else { 127 };
+    let min_normal = if double { -1022 } else { -126 };
+    let max_exp = if double { 1023 } else { 127 };
     let sign = u64::from(negative) << if double { 63 } else { 31 };
-    let mut highest = 63 - magnitude.leading_zeros();
-    let mut flags = 0;
-    let mut significand = if highest <= fraction_bits {
-        magnitude << (fraction_bits - highest)
+    let inf = if double {
+        0x7ff0_0000_0000_0000
     } else {
-        let shift = highest - fraction_bits;
+        0x7f80_0000
+    };
+    let max_finite = if double {
+        0x7fef_ffff_ffff_ffff
+    } else {
+        0x7f7f_ffff
+    };
+    let highest = 63 - magnitude.leading_zeros();
+    let mut target = highest as i32 - fbits as i32;
+    let overflow = |to_inf: bool| {
+        (
+            sign | if to_inf { inf } else { max_finite },
+            OFC | IXC,
+        )
+    };
+    if target > max_exp {
+        let to_inf = match (fpcr >> 22) & 3 {
+            1 => !negative,
+            2 => negative,
+            3 => false,
+            _ => true,
+        };
+        return overflow(to_inf);
+    }
+    if target >= min_normal {
+        let mut flags = 0;
+        let mut significand = if highest <= fraction_bits {
+            magnitude << (fraction_bits - highest)
+        } else {
+            let shift = highest - fraction_bits;
+            let tail = magnitude & ((1u64 << shift) - 1);
+            let head = magnitude >> shift;
+            let half = 1u64 << (shift - 1);
+            let increment = tail != 0
+                && match (fpcr >> 22) & 3 {
+                    0 => tail > half || (tail == half && head & 1 != 0),
+                    1 => !negative,
+                    2 => negative,
+                    _ => false,
+                };
+            if tail != 0 {
+                flags = IXC;
+            }
+            head + u64::from(increment)
+        };
+        if significand == 1 << (fraction_bits + 1) {
+            significand >>= 1;
+            target += 1;
+        }
+        if target > max_exp {
+            return (sign | inf, OFC | IXC);
+        }
+        return (
+            sign | (u64::from((target + bias) as u32) << fraction_bits)
+                | (significand & ((1 << fraction_bits) - 1)),
+            flags,
+        );
+    }
+    let power = fraction_bits as i32 - min_normal - fbits as i32;
+    let (ulps, inexact) = if power >= 0 {
+        (magnitude << power, false)
+    } else if power <= -64 {
+        (0, true)
+    } else {
+        let shift = (-power) as u32;
         let tail = magnitude & ((1u64 << shift) - 1);
         let head = magnitude >> shift;
         let half = 1u64 << (shift - 1);
@@ -185,19 +261,140 @@ pub(crate) fn integer_to_float(
                 2 => negative,
                 _ => false,
             };
-        if tail != 0 {
-            flags = IXC;
-        }
-        head + u64::from(increment)
+        (head + u64::from(increment), tail != 0)
     };
-    if significand == 1 << (fraction_bits + 1) {
-        significand >>= 1;
-        highest += 1;
+    let mut flags = if inexact { IXC } else { 0 };
+    if ulps == 0 {
+        return (sign, if inexact { UFC | IXC } else { 0 });
     }
+    if ulps >= 1 << fraction_bits {
+        return (sign | (1u64 << fraction_bits), flags);
+    }
+    if inexact {
+        flags |= UFC;
+    }
+    (sign | ulps, flags)
+}
+
+/// FCVTZS/FCVTZU fixed-point. Rounding is toward zero. `fbits` is fractional.
+pub(crate) fn float_to_fixed(
+    input: u64,
+    double: bool,
+    wide: bool,
+    signed: bool,
+    fbits: u32,
+    fpcr: u64,
+) -> (u64, u64) {
+    let fraction_bits = if double { 52 } else { 23 };
+    let bias = if double { 1023i32 } else { 127 };
+    let exp_mask = if double { 0x7ffi32 } else { 0xff };
+    let sign_bit = 1u64 << if double { 63 } else { 31 };
+    let bits = if double { input } else { input as u32 as u64 };
+    let negative = bits & sign_bit != 0;
+    let exponent = ((bits >> fraction_bits) & u64::from(exp_mask as u32)) as i32;
+    let fraction = bits & ((1u64 << fraction_bits) - 1);
+    if exponent == 0 && fraction != 0 && fpcr & (1 << 24) != 0 {
+        return (0, IDC);
+    }
+    if exponent == exp_mask {
+        if fraction != 0 {
+            return (0, IOC);
+        }
+        return (saturate_fixed(negative, 1u128 << 127, wide, signed).0, IOC);
+    }
+    if exponent == 0 && fraction == 0 {
+        return (0, 0);
+    }
+    let significand = if exponent == 0 {
+        fraction
+    } else {
+        fraction | (1u64 << fraction_bits)
+    };
+    let unbiased = if exponent == 0 {
+        1 - bias
+    } else {
+        exponent - bias
+    };
+    let shift = unbiased - fraction_bits as i32 + fbits as i32;
+    let (magnitude, inexact) = if shift >= 64 {
+        (1u128 << 127, true)
+    } else if shift >= 0 {
+        ((u128::from(significand)) << shift, false)
+    } else if shift <= -64 {
+        (0, significand != 0)
+    } else {
+        let right = (-shift) as u32;
+        let tail = significand & ((1u64 << right) - 1);
+        (u128::from(significand >> right), tail != 0)
+    };
+    let (result, saturated) = saturate_fixed(negative, magnitude, wide, signed);
+    let flags = if saturated {
+        IOC
+    } else if inexact {
+        IXC
+    } else {
+        0
+    };
+    (result, flags)
+}
+
+fn saturate_fixed(negative: bool, magnitude: u128, wide: bool, signed: bool) -> (u64, bool) {
+    if !signed {
+        if negative && magnitude != 0 {
+            return (0, true);
+        }
+        let max = if wide {
+            u128::from(u64::MAX)
+        } else {
+            u128::from(u32::MAX)
+        };
+        return if magnitude > max {
+            (max as u64, true)
+        } else {
+            (magnitude as u64, false)
+        };
+    }
+    if !negative {
+        let max = if wide {
+            u128::from(i64::MAX as u64)
+        } else {
+            u128::from(i32::MAX as u32)
+        };
+        return if magnitude > max {
+            (max as u64, true)
+        } else {
+            (magnitude as u64, false)
+        };
+    }
+    let min_mag = if wide { 1u128 << 63 } else { 1u128 << 31 };
+    if magnitude > min_mag {
+        return (
+            if wide {
+                i64::MIN as u64
+            } else {
+                i32::MIN as u32 as u64
+            },
+            true,
+        );
+    }
+    if magnitude == min_mag {
+        return (
+            if wide {
+                i64::MIN as u64
+            } else {
+                i32::MIN as u32 as u64
+            },
+            false,
+        );
+    }
+    let wrapped = (magnitude as u64).wrapping_neg();
     (
-        sign | (u64::from(highest + bias) << fraction_bits)
-            | (significand & ((1 << fraction_bits) - 1)),
-        flags,
+        if wide {
+            wrapped
+        } else {
+            wrapped as u32 as u64
+        },
+        false,
     )
 }
 
