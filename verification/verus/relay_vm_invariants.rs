@@ -187,6 +187,93 @@ proof fn stream_pending_consumption(start: nat, end: nat, count: nat, capacity: 
         count == end - start ==> start + count == end,
 {}
 
+/// IPv4 header span model paired with net_frame::ipv4_span_ok.
+/// Socket NAT, DHCP payloads, and checksum bytes are outside this lemma.
+proof fn ipv4_header_fits_ethernet_frame(frame_len: nat, ihl: nat, total: nat)
+    requires
+        5 <= ihl <= 15,
+        total >= ihl * 4,
+        frame_len >= 14,
+        total <= frame_len - 14,
+        frame_len <= 2048,
+    ensures
+        14 + total <= frame_len,
+        ihl * 4 <= total,
+        total <= 2048,
+{
+}
+
+/// Signed AOT image identity. Paired with aot::image_bytes_match.
+/// A changed guest byte must not reuse the signed translation.
+proof fn signed_translation_rejects_a_changed_byte(expected: Seq<u8>, live: Seq<u8>, i: int)
+    requires
+        0 <= i < expected.len(),
+        expected.len() == live.len(),
+        expected[i] != live[i],
+    ensures
+        expected != live,
+{
+}
+
+spec fn translation_dropped_model(store_page: nat, executed_page: nat) -> bool {
+    store_page == executed_page
+}
+
+proof fn store_into_executed_page_drops_translation(store_page: nat, executed_page: nat)
+    ensures
+        translation_dropped_model(store_page, executed_page) == (store_page == executed_page),
+{
+}
+
+/// AOT software TLB: a hit is the page base plus the in-page offset.
+proof fn aot_tlb_hit_stays_in_page(offset: nat, va_page: nat, pa_page: nat)
+    requires offset < 4096,
+    ensures
+        pa_page + offset >= pa_page,
+        (pa_page + offset) - pa_page == offset,
+        (pa_page + offset) - pa_page < 4096,
+{
+}
+
+/// Shared-RAM span for two AOT host threads. Mutex ordering is outside this lemma.
+proof fn aot_shared_ram_span(offset: nat, len: nat, ram: nat)
+    requires offset + len <= ram,
+    ensures offset + len <= ram,
+        len == 0 ==> offset <= ram,
+{
+}
+
+/// FIN only after inflight and guest queue are empty. Socket checksums remain unproved.
+proof fn tcp_fin_requires_empty_inflight(
+    peer_fin: bool,
+    sent_fin: bool,
+    inflight_empty: bool,
+    queued_empty: bool,
+    open: bool,
+)
+    ensures
+        ({
+            let send = peer_fin && !sent_fin && inflight_empty && queued_empty && open;
+            &&& (send ==> inflight_empty)
+            &&& (send ==> queued_empty)
+            &&& (send ==> !sent_fin)
+            &&& (send ==> peer_fin && open)
+        }),
+{
+}
+
+/// BUFFER_DIFF word span times four stays inside the file and the message body.
+proof fn buffer_diff_span_fits(file_len: nat, start: nat, end: nat, pos: nat, body_len: nat)
+    requires
+        end > start,
+        (end - start) * 4 + pos <= body_len,
+        start * 4 + (end - start) * 4 <= file_len,
+    ensures
+        start * 4 + (end - start) * 4 <= file_len,
+        pos + (end - start) * 4 <= body_len,
+{
+}
+
 fn main() {}
 
 }

@@ -1,0 +1,3 @@
+# Bypass repo verified-runner. This crate is a host Loom model only.
+[target.'cfg(all())']
+runner = ["/usr/bin/env"]

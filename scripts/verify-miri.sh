@@ -51,7 +51,10 @@ for suite in \
   cpu::native_reference::logical_immediate_stack_ \
   cpu::native_reference::table_lookup_boundaries_ \
   cpu::native_reference::saturating_arithmetic_aliases_ \
-  cpu::native_reference::reserved_
+  cpu::native_reference::reserved_ \
+  aot::tests::software_tlb_ \
+  aot::tests::two_host_threads_ \
+  shm_import::tests::buffer_diff_
 do
   cargo "+${MIRI_TOOLCHAIN:-nightly}" miri test -p relay-vm --locked "$suite"
 done

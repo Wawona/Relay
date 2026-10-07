@@ -17,6 +17,22 @@ evidence for these rows only. It is not a whole-VM correctness claim.
 | Executable mappings obey effective privilege, leaf/table XN and WXN | `mmu::permits` | `executable_mappings_obey_privilege_and_execute_never` | `execute_permission_excludes_forbidden_access` is a Boolean model, not a walker refinement proof | Instruction-fetch leaf/table/exception matrix on both page sizes |
 | XN never restricts data access; table AP restrictions deny writes/EL0 access | `mmu::permits` | `data_permissions_ignore_execute_never_and_respect_tables` | No separate model | Inherited data restrictions on both page sizes |
 | Software interrupts target CPU 0 only for its explicit bit or self filter; IDs stay below 16 | `bus::sgi_for_cpu0` | `software_interrupt_targets_only_the_single_cpu` | `single_cpu_sgi_routing`, routing model only | All 16 IDs, all filters, representative target masks, acknowledge/EOI; Miri |
+| A signed AOT image runs only while live bytes match; a store into that page drops the translation | `aot::image_bytes_match`, `aot::translation_dropped`, `aot::run_image` | `signed_image_rejects_a_changed_byte`, `store_to_an_executed_page_drops_translation` | `signed_translation_rejects_a_changed_byte`, `store_into_executed_page_drops_translation` (Boolean model, not a NixOS-image refinement) | 3-instruction block matches StaticCpu with zero fallback; a flipped byte uses only `step`; two vCPU threads |
+| AOT software TLB hit is the PA page plus the VA offset and stays in that page | `aot::tlb_translate` | `tlb_hit_stays_inside_the_page` | `aot_tlb_hit_stays_in_page` | `software_tlb_hits_on_the_second_lookup` |
+| AOT executes a translated block only when the image is signed, the page is live, and a block exists | `aot::aot_block_eligible` | `aot_block_requires_signed_live_bytes` | Same Boolean as Kani | 3-instruction AOT path; mutated bytes take `step` |
+| Two AOT host threads store through a mutex-bounded shared RAM span | `aot::ram_span_ok`, `aot::SharedRam` | `shared_ram_span_never_wraps_past_len` | `aot_shared_ram_span` (span only; not a guest-SMP memory model) | `two_host_threads_observe_shared_ram_after_join`; two vCPU jobs still have private StaticCpu arenas |
+| NAT FIN is sent only after inflight is empty | `net_host::tcp_may_send_fin` | `fin_requires_empty_inflight` | `tcp_fin_requires_empty_inflight` | TCP loopback 64 KiB; not a TLS proof |
+| Waypipe BUFFER_DIFF spans stay inside the SHM file and the message body | `shm_import::buffer_diff_span` | `buffer_diff_span_never_writes_past_the_file` | `buffer_diff_span_fits` | `buffer_diff_writes_u32_spans_into_the_shm_file` |
+| Waypipe kind is 5 bits; connection headers require CONN_FIXED | `shm_import::wmsg_size_and_kind`, `waypipe_connection_header_ok` | `wmsg_kind_stays_in_five_bits`, `connection_header_requires_fixed_bit` | No separate model | Auth16/17 connection header `0x0001098c` |
+
+## Tools that do not extend this register
+
+- Creusot, Prusti, and Flux see safe Rust only. A green run does not add a row above.
+- Loom preemption bounds are finite. They are not an unbounded concurrency proof.
+- `page_translate` and `vsock_packets` cargo-fuzz jobs run 60 seconds and request AddressSanitizer (`-s address`). If the nightly rejects that flag, the job falls back to 60s without ASan and must not claim ASan in the summary.
+- Loom lifecycle lives in `verification/loom-lifecycle` (`RUSTFLAGS=--cfg loom`). Finite preemption only.
+- proptest covers `ram_span_ok` in `relay-vm`.
+- A missing heavy binary after an install attempt fails the job. It is not a silent skip.
 
 ## Preconditions
 
@@ -44,6 +60,8 @@ evidence for these rows only. It is not a whole-VM correctness claim.
 - Compiler, linker, operating system, hardware, or supply-chain correctness.
 - Equivalence between the Verus mathematical model and every future production
   refactor. Review must maintain the named pairing.
+- The bundled NixOS image as an AOT closure. Shared StaticCpu SMP on one
+  `GuestMemory`. NAT TLS record delivery. Waypipe compositor semantics.
 
 Fuzzing, Miri, sanitizers, Clippy, OSV, cargo-deny, CodeQL, and tests add
 independent evidence. They do not expand the mathematical proof boundary.

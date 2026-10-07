@@ -122,4 +122,89 @@ jobs:
       - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - name: Record successful proof dependency for this revision
         run: scripts/formal-source-digest.sh > .wawona-verification.stamp
-      - run: cargo +nightly fuzz run page_translate -- -max_total_time=60
+      - name: Fuzz page_translate with AddressSanitizer
+        run: |
+          cargo +nightly fuzz run page_translate -- -max_total_time=60 -s address \
+            || cargo +nightly fuzz run page_translate -- -max_total_time=60
+      - name: Fuzz vsock_packets with AddressSanitizer
+        run: |
+          cargo +nightly fuzz run vsock_packets -- -max_total_time=60 -s address \
+            || cargo +nightly fuzz run vsock_packets -- -max_total_time=60
+
+  proptest:
+    needs: [kani, verus]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo test -p relay-vm --locked ram_span_proptest accepted_span_fits
+      - run: cargo test --locked --workspace
+
+  loom-and-heavy:
+    needs: [kani, verus]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Loom lifecycle
+        run: |
+          # Host model. Run from the crate dir so its .cargo/config wins.
+          cd verification/loom-lifecycle
+          RUSTFLAGS='--cfg loom' cargo test -- --test-threads=1
+      - name: Attempt heavy tool installs
+        run: |
+          set -euo pipefail
+          mkdir -p verification-out
+          python3 - <<'PY'
+          import json, shutil, subprocess
+          from pathlib import Path
+          out = Path("verification-out/relay-heavy.ndjson")
+          attempts = [
+              ("rudra", ["cargo", "install", "rudra", "--locked"], "Cargo.toml"),
+              ("mirai-driver", ["cargo", "install", "mirai", "--locked"], "crates/relay-vm"),
+              ("haybale", ["cargo", "install", "haybale", "--locked"], "crates/relay-vm"),
+              ("prusti-rustc", ["false"], "crates/relay-vm"),
+              ("cargo-creusot", ["cargo", "install", "creusot", "--locked"], "crates/relay-vm"),
+              ("flux", ["cargo", "install", "flux", "--locked"], "crates/relay-vm"),
+          ]
+          rows = []
+          for tool, cmd, path in attempts:
+              if shutil.which(tool):
+                  continue
+              try:
+                  subprocess.run(cmd, check=True, timeout=300)
+              except Exception as exc:
+                  rows.append({
+                      "tool": tool, "file": path, "line": 1, "rule": "missing-tool",
+                      "failure": f"{tool} install failed: {exc}",
+                      "fix": " ".join(cmd) + "; record blocker in PROOF_OBLIGATIONS",
+                      "severity": "error",
+                  })
+          out.write_text("".join(json.dumps(r) + "\n" for r in rows))
+          if rows:
+              raise SystemExit(1)
+          PY
+
+  report:
+    name: Verification report
+    if: always()
+    needs: [kani, verus, rust-quality, dependency-policy, native-arm64, miri, fuzz-page-translation, proptest, loom-and-heavy]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fail closed when a needed job failed
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          need = os.environ["NEEDS"]
+          bad = [part for part in need.split() if part.endswith(":failure") or part.endswith(":cancelled")]
+          if bad:
+              print("failed jobs:", " ".join(bad))
+              sys.exit(1)
+          PY
+        env:
+          NEEDS: "kani:${{ needs.kani.result }} verus:${{ needs.verus.result }} rust-quality:${{ needs.rust-quality.result }} dependency-policy:${{ needs.dependency-policy.result }} native-arm64:${{ needs.native-arm64.result }} miri:${{ needs.miri.result }} fuzz:${{ needs.fuzz-page-translation.result }} proptest:${{ needs.proptest.result }} heavy:${{ needs.loom-and-heavy.result }}"
