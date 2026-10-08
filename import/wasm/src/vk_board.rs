@@ -13,7 +13,7 @@
 //! * uniform: 144-byte camera block
 
 use ash::vk;
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::sync::Mutex;
 
 const ENOSYS: i32 = 52;
@@ -285,7 +285,8 @@ impl Gpu {
             let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
             name == c"VK_KHR_portability_subset"
         });
-        let dev_ext: Vec<*const i8> = if portability {
+        // Android aarch64: c_char is u8. Do not hardcode *const i8.
+        let dev_ext: Vec<*const c_char> = if portability {
             vec![c"VK_KHR_portability_subset".as_ptr()]
         } else {
             Vec::new()
