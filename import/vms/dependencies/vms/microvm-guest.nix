@@ -1,7 +1,8 @@
 # wawona-microvm — a NixOS guest driven by microvm.nix under vfkit
-# (Apple Virtualization.framework) on macOS. This is the p26 "NixOS VM" machine
-# type's *developer path*: `nix run .#wawona-microvm` builds+boots the guest and
-# `nix run .#wawona-vm-bridge` forwards its Wayland session into Wawona.
+# (Apple Virtualization.framework) on macOS. Guest definition for the
+# Linux-first dogfood path: `nix run .#wawona-microvm-session` (Wawona flake)
+# supervises bridge + vfkit. Product Machines engine remains Relay; this module
+# is the shared guest Wayland/vsock shape.
 #
 # WHY microvm.nix + vfkit instead of a hand-rolled rootfs:
 #   * vfkit IS Virtualization.framework (same tech as the in-app Swift launcher
@@ -16,9 +17,8 @@
 #     by the microvm module.
 #
 # vsock topology (vfkit default "listen" mode == guest->host):
-#   guest:  waypipe --vsock -s <port> server -- sway   (CID omitted => connect
-#           out to host CID 2 on <port>; this is waypipe's documented guest->host
-#           form, NOT `--socket vsock:2:<port>` which is a literal unix path)
+#   guest:  waypipe --no-gpu --vsock -s <port> server -- <client>
+#           (CID omitted => connect out to host CID 2 on <port>)
 #   vfkit:  --device virtio-vsock,port=<port>,socketURL=<unix sock> (listen):
 #           when the guest connects to vsock <port>, vfkit connects to the host
 #           unix socket, which the host bridge is LISTENING on.
@@ -36,8 +36,11 @@
   # vfkit hardcodes vsock port 1024; the guest waypipe server binds it.
   vsockPort ? 1024,
   # Host-side unix socket vfkit exposes for the guest vsock channel. The bridge
-  # (wawona-vm-bridge) connects here and relays into Wawona's wayland-0.
+  # (wawona-vm-bridge / wawona-microvm-session) listens here.
   vsockSocketPath ? "/tmp/wawona-guest-vsock.sock",
+  # Default Wayland *client* forwarded into Wawona. Override with a full argv
+  # string (e.g. weston-terminal) or replace the unit via `extraModule`.
+  sessionClient ? null,
   # Extra NixOS module to swap the session (wwn-niri/sway/hyprland/...).
   extraModule ? { },
 }:
@@ -47,6 +50,9 @@ nixpkgs.lib.nixosSystem {
     microvm.nixosModules.microvm
     (
       { config, pkgs, lib, ... }:
+      let
+        client = if sessionClient != null then sessionClient else "${pkgs.foot}/bin/foot";
+      in
       {
         nixpkgs.hostPlatform = guestSystem;
 
@@ -138,11 +144,9 @@ nixpkgs.lib.nixosSystem {
         # relays it into Wawona, which IS the compositor.
         #
         # IMPORTANT: waypipe forwards Wayland *clients*, not compositors. Wawona is
-        # the compositor, so the guest runs a client app (foot) whose window
-        # appears as a native Wawona window. Running a nested compositor here would
-        # require it to act as a Wayland *client* of waypipe's display (e.g. sway
-        # with WLR_BACKENDS=wayland) — that is the Phase-29 wwn-* nested-compositor
-        # path; for the base p26 machine we forward a client directly.
+        # the compositor, so the guest runs a client app (foot by default) whose
+        # window appears as a native Wawona window. Swap via `sessionClient` or
+        # `extraModule` (weston-terminal / nested niri later).
         systemd.services.wawona-session = {
           description = "Wawona Wayland session forwarded to host over vsock";
           wantedBy = [ "multi-user.target" ];
@@ -166,16 +170,23 @@ nixpkgs.lib.nixosSystem {
             mkdir -p "$XDG_RUNTIME_DIR"
             echo "[wawona-session] waypipe $(${pkgs.waypipe}/bin/waypipe --version 2>&1 | head -1)" >&2
             echo "[wawona-session] connecting waypipe server to host vsock CID 2 port ${toString vsockPort}" >&2
+            # Ready marker for host scrapers (same string as Relay guest units).
+            # Printed before dial-out so session supervision can proceed while
+            # waypipe retries vsock until the host bridge is listening.
+            printf 'WAWONA_RELAY_READY=1\n' >&2
+            if [ -w /dev/hvc0 ]; then
+              printf 'WAWONA_RELAY_READY=1\n' > /dev/hvc0 || true
+            fi
             # waypipe's guest->host vsock form: `--vsock -s <port> server` with the
             # CID omitted connects out to the host (CID 2). vfkit (default listen
             # mode) forwards that to the host-side unix socket. The forwarded
-            # command must be a Wayland *client* (foot), whose window appears in
-            # Wawona as a native window.
+            # command must be a Wayland *client*, whose window appears in Wawona.
             # Set WAYPIPE_DEBUG=1 (via the unit env) to add --debug for tracing.
             exec ${pkgs.waypipe}/bin/waypipe \
               ''${WAYPIPE_DEBUG:+--debug} \
+              --no-gpu \
               --vsock -s ${toString vsockPort} \
-              server -- ${pkgs.foot}/bin/foot
+              server -- ${client}
           '';
         };
 
