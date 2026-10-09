@@ -51,7 +51,56 @@ nixpkgs.lib.nixosSystem {
     (
       { config, pkgs, lib, ... }:
       let
-        client = if sessionClient != null then sessionClient else "${pkgs.foot}/bin/foot";
+        # Default: several software Wayland clients share one waypipe display so
+        # Linux-first dogfood exercises more than a single foot window. Override
+        # with `sessionClient` for a single binary, or `extraModule` for a DE.
+        multiClientLauncher =
+          let
+            W = "${pkgs.weston}/bin";
+          in
+          pkgs.writeShellScript "wawona-session-clients" ''
+            set -eu
+            echo "[wawona-session] WAYLAND_DISPLAY=''${WAYLAND_DISPLAY:-unset}" >&2
+            echo "[wawona-session] launching multi-client set into Wawona" >&2
+            pids=""
+            launch() {
+              local name="$1"; shift
+              local bin="$1"
+              shift || true
+              if [ ! -x "$bin" ]; then
+                echo "[wawona-session] skip $name (missing $bin)" >&2
+                return 0
+              fi
+              echo "[wawona-session] start $name: $bin $*" >&2
+              "$bin" "$@" &
+              pids="$pids $!"
+              # Stagger so waypipe + host compositor can accept each toplevel.
+              sleep 1
+            }
+            # Software / SHM clients only. Skip EGL (subsurfaces),
+            # wp_presentation v2 (presentation-shm), and nested sway for the
+            # first dogfood set (sway needs a stable wl_compositor bind).
+            launch foot ${pkgs.foot}/bin/foot
+            launch weston-terminal ${W}/weston-terminal
+            launch weston-flower ${W}/weston-flower
+            launch weston-smoke ${W}/weston-smoke
+            launch weston-clickdot ${W}/weston-clickdot
+            launch weston-dnd ${W}/weston-dnd
+            launch weston-editor ${W}/weston-editor
+            launch weston-stacking ${W}/weston-stacking
+            launch weston-transformed ${W}/weston-transformed
+            launch weston-resizor ${W}/weston-resizor
+            launch weston-scaler ${W}/weston-scaler
+            launch weston-multi-resource ${W}/weston-multi-resource
+            # Keep the waypipe server child alive while any client runs.
+            status=0
+            for pid in $pids; do
+              wait "$pid" || status=$?
+            done
+            exit "$status"
+          '';
+        client =
+          if sessionClient != null then sessionClient else "${multiClientLauncher}";
       in
       {
         nixpkgs.hostPlatform = guestSystem;
@@ -134,6 +183,7 @@ nixpkgs.lib.nixosSystem {
           waypipe
           sway
           foot
+          weston
           wayland-utils
           git
           vim
@@ -144,9 +194,9 @@ nixpkgs.lib.nixosSystem {
         # relays it into Wawona, which IS the compositor.
         #
         # IMPORTANT: waypipe forwards Wayland *clients*, not compositors. Wawona is
-        # the compositor, so the guest runs a client app (foot by default) whose
-        # window appears as a native Wawona window. Swap via `sessionClient` or
-        # `extraModule` (weston-terminal / nested niri later).
+        # the compositor. Default session launches foot + weston-terminal +
+        # weston-simple-shm (+ optional nested sway on WLR_BACKENDS=wayland).
+        # Swap via `sessionClient` or `extraModule`.
         systemd.services.wawona-session = {
           description = "Wawona Wayland session forwarded to host over vsock";
           wantedBy = [ "multi-user.target" ];
