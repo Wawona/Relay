@@ -115,6 +115,17 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-11 (N15 ANGLE minos RED on eio tip)
+
+- Live eio tip `Wawona-n11-eio-fix.app`: Mode A sim audit **RED**.
+  `Frameworks/libEGL.dylib` / `libGLESv2.dylib` `minos 16.0` sdk 18.5
+  (prebuilt ANGLE). Sim Mode A max floor 14.0.
+- Also ships loose `libEGL.dylib` + `libEGL.framework` (ASC loose-dylib
+  class). n15b must embed source-built ANGLE at deploymentTarget 13/14
+  and prefer framework-only (no flat dylib) for store path.
+- Keep eio for AUTH/SHM; do not treat its ANGLE floor as N15 GREEN.
+- Completely complete still **0%**.
+
 ### 2026-10-11 (N15 ios-sim n15b restart)
 
 - Prior ios-sim (~2h) **interrupted** mid moltenvk SPIRV-Tools arm64;
