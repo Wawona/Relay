@@ -115,6 +115,19 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-11 (N15 SS GREEN; N14 fix5 hang; disk; fix6)
+
+- N15: `swiftshader-ios-sim` **GREEN**. Archive
+  `/tmp/result-ss-ios-sim-fix` 84M; `MCDisassembler` D2/typeinfo defined
+  (`8d4a889`). Next: ios-sim link + ANGLE.
+- N14 fix5: container **Started** @gt≈268 (DefaultDependencies fix worked)
+  then hung before READY (overlay or blocking hvc0). No marker in console.
+- fix6: emit `WAWONA_OCI_READY` on journal stdout **before** overlay/hvc0
+  (`8aa6070`). Guest rebuild hit **No space left**; reclaimed tip apps +
+  smoke states + nix GC (~171Gi free). Rebuild `/tmp/result-guest-n14-fix6`
+  then re-smoke.
+- eio-fix AUTH/SHM kept. Completely complete still **0%**.
+
 ### 2026-10-11 (N14 READY path; SS nm -u false fail)
 
 - eio-fix still LIVE `auth=1`. Do not kill.
