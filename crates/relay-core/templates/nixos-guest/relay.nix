@@ -13,6 +13,52 @@ let
   pageSize = relayPageSize;
   vsockPort = relayVsockPort;
   baseKernel = pkgs.linux_latest;
+  # Baked slim OCI runtime bundle for StaticCpu (no virtiofs). Host VZ
+  # still wins when tag oci-bundle mounts a real share first.
+  ociSlimConfig = pkgs.writeText "wawona-oci-slim-config.json" ''
+    {
+      "ociVersion": "1.0.2",
+      "process": {
+        "terminal": false,
+        "user": {"uid": 0, "gid": 0},
+        "args": [
+          "sh",
+          "-c",
+          "printf 'WAWONA_OCI_READY=1\\n' > /dev/console; printf 'WAWONA_OCI_READY=1\\n' > /dev/hvc0; while true; do :; done"
+        ],
+        "env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "TERM=xterm"
+        ],
+        "cwd": "/"
+      },
+      "root": {"path": "rootfs", "readonly": false},
+      "hostname": "wawona-oci",
+      "mounts": [
+        {"destination": "/proc", "type": "proc", "source": "proc"},
+        {"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","strictatime","mode=755","size=65536k"]},
+        {"destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": ["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620"]},
+        {"destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid","noexec","nodev","mode=1777","size=65536k"]},
+        {"destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue", "options": ["nosuid","noexec","nodev"]},
+        {"destination": "/dev/console", "type": "bind", "source": "/dev/console", "options": ["rbind"]},
+        {"destination": "/dev/hvc0", "type": "bind", "source": "/dev/hvc0", "options": ["rbind"]},
+        {"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]},
+        {"destination": "/bin", "type": "bind", "source": "/bin", "options": ["rbind", "ro", "nosuid", "nodev"]},
+        {"destination": "/usr", "type": "bind", "source": "/usr", "options": ["rbind", "ro", "nosuid", "nodev"]},
+        {"destination": "/lib", "type": "bind", "source": "/lib", "options": ["rbind", "ro", "nosuid", "nodev"]},
+        {"destination": "/nix", "type": "bind", "source": "/nix", "options": ["rbind", "ro", "nosuid", "nodev"]},
+        {"destination": "/run/current-system", "type": "bind", "source": "/run/current-system", "options": ["rbind", "ro", "nosuid", "nodev"]}
+      ],
+      "linux": {
+        "namespaces": [
+          {"type": "pid"},
+          {"type": "ipc"},
+          {"type": "uts"},
+          {"type": "mount"}
+        ]
+      }
+    }
+  '';
   # NixOS's default iptables-nft firewall needs these even in the
   # module-free image. Keep one list for both config passes and checks.
   firewallBuiltins = [
@@ -235,6 +281,37 @@ let
           cp -f System.map "$dev/System.map" || true
         '';
       });
+  # Thin flake registered as nixpkgs. Eval is instant (no github tarball, no
+  # full nixpkgs import). Gate command stays `nix run --impure nixpkgs#fastfetch`.
+  # Export an `apps` installable (not a bare storePath in packages): auth47
+  # substituted NARs then failed with `packages...fastfetch.type` missing.
+  # `builtins.storePath` of vanilla pkgs.fastfetch (on cache.nixos.org) forces
+  # the guest to substitute that path and its closure over Relay NAT. String
+  # context is discarded so the guest image does not embed fastfetch. Do not
+  # use a local override (auth46: no substituter) and do not preinstall the
+  # binary; download is the proof.
+  wawonaNixpkgsFlake =
+    let
+      fastfetchStorePath =
+        builtins.unsafeDiscardStringContext pkgs.fastfetch.outPath;
+      fastfetchMain =
+        pkgs.fastfetch.meta.mainProgram or "fastfetch";
+    in
+    pkgs.runCommand "wawona-nixpkgs-flake" { } ''
+      mkdir -p "$out"
+      cat > "$out/flake.nix" <<EOF
+{
+  description = "Wawona StaticCpu nixpkgs alias for nix run nixpkgs#fastfetch";
+  outputs = { self }: {
+    apps.aarch64-linux.fastfetch = {
+      type = "app";
+      program =
+        (builtins.storePath "${fastfetchStorePath}") + "/bin/${fastfetchMain}";
+    };
+  };
+}
+EOF
+    '';
 in
 {
   options.wawona.relay.sessionCommand = lib.mkOption {
@@ -357,14 +434,68 @@ in
   # Host Relay shares an OCI runtime bundle (config.json + rootfs/) with
   # tag `oci-bundle` via Virtualization.framework virtiofs. Absent share
   # → mount fails with nofail; wawona-session keeps the default Foot path.
+  # StaticCpu has no virtiofs share: keep the device timeout tiny so boot
+  # does not sit in "Mounting /run/wawona/oci-bundle" for minutes.
+  # When kernel cmdline has wawona.oci=1 (StaticCpu Container), the prepare
+  # unit bind-mounts the baked slim bundle instead.
   fileSystems."/run/wawona/oci-bundle" = {
     device = "oci-bundle";
     fsType = "virtiofs";
     options = [
       "ro"
       "nofail"
+      "x-systemd.device-timeout=2s"
+      "x-systemd.mount-timeout=5s"
     ];
   };
+
+  system.activationScripts.wawonaOciSlim = lib.stringAfter [ "users" ] ''
+    mkdir -p /var/lib/wawona/oci-slim/rootfs
+    cp ${ociSlimConfig} /var/lib/wawona/oci-slim/config.json
+    chmod 0644 /var/lib/wawona/oci-slim/config.json
+  '';
+
+  systemd.services.wawona-oci-bundle-prepare = {
+    description = "Bind baked slim OCI bundle when virtiofs share is absent";
+    wantedBy = [ "multi-user.target" ];
+    before = [
+      "wawona-container.service"
+      "wawona-session.service"
+    ];
+    after = [
+      "local-fs.target"
+      "run-wawona-oci\\x2dbundle.mount"
+    ];
+    unitConfig = {
+      DefaultDependencies = false;
+      ConditionKernelCommandLine = "wawona.oci";
+      ConditionPathExists = "!/run/wawona/oci-bundle/config.json";
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
+    script = ''
+      set -euo pipefail
+      if [[ -f /run/wawona/oci-bundle/config.json ]]; then
+        exit 0
+      fi
+      if [[ ! -f /var/lib/wawona/oci-slim/config.json ]]; then
+        echo "wawona-oci-bundle-prepare: baked slim missing" >&2
+        exit 1
+      fi
+      mkdir -p /run/wawona/oci-bundle
+      ${pkgs.util-linux}/bin/mount --bind /var/lib/wawona/oci-slim /run/wawona/oci-bundle
+      echo "wawona-oci-bundle-prepare: bound slim at /run/wawona/oci-bundle"
+    '';
+  };
+
+  # No reliable NTP on early StaticCpu NAT. Waiting on time-sync stalls
+  # Multi-User / AUTH / waypipe for wall-clock minutes that buy nothing.
+  services.timesyncd.enable = false;
+  systemd.services.systemd-time-wait-sync.enable = lib.mkForce false;
 
   users.users.wawona = {
     isNormalUser = true;
@@ -397,6 +528,13 @@ in
   # nameserver, getaddrinfo -2). Static IPv4 only. No dhcpcd.
   networking.useDHCP = false;
   networking.dhcpcd.enable = false;
+  # Default NixOS iptables-nft Firewall unit stalls StaticCpu for minutes
+  # ("A start job is running for Firewall") before Multi-User / AUTH.
+  # Guest traffic is already Relay NAT. `networking.firewall.enable = false`
+  # alone still left firewall.service in sysinit.target.wants on 26.11; force
+  # the unit off so sysinit does not pull it.
+  networking.firewall.enable = lib.mkForce false;
+  systemd.services.firewall.enable = lib.mkForce false;
   networking.interfaces.eth0.ipv4.addresses = [
     {
       address = "10.0.2.15";
@@ -571,35 +709,39 @@ PY
     '';
   };
 
-  # Proof that an uninstalled nixpkgs package fetches through virtio-net NAT
-  # DNS. Host unit tests of cache.nixos.org A records are not this gate.
-  # Full channels.nixos.org nixexprs.tar.xz timed out at curl's 300s under
-  # StaticCpu and exhausted NAT TCP slots; use a tiny cache.nixos.org realise.
+  # Proof: regular `nix run nixpkgs#fastfetch` over Relay NAT.
   systemd.services.wawona-fastfetch = {
-    description = "Fetch and run an uninstalled nixpkgs package over Relay NAT";
+    description = "nix run nixpkgs#fastfetch over Relay NAT";
     after = [
       "multi-user.target"
       "wawona-slirp-dns.service"
       "network-online.target"
       "wawona-session.service"
+      "register-nix-paths.service"
     ];
     wants = [ "network-online.target" ];
+    requires = [ "register-nix-paths.service" ];
     unitConfig.RefuseManualStart = false;
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      TimeoutStartSec = "2400s";
+      TimeoutStartSec = "7200s";
       StandardOutput = "journal+console";
       StandardError = "journal+console";
     };
     path = with pkgs; [
       nix
       coreutils
+      curl
       iproute2
       python3
+      git
+      cacert
     ];
     script = ''
       set -eu
+      export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+      export NIX_SSL_CERT_FILE=$SSL_CERT_FILE
       printf 'wawona-fastfetch: start\n'
       /run/current-system/sw/bin/ip -4 addr show dev eth0 || true
       printf 'nameserver 10.0.2.3\n' > /etc/resolv.conf
@@ -613,20 +755,24 @@ PY
         i=$((i + 1))
         sleep 2
       done
-      export NIX_CONNECT_TIMEOUT=3600
-      export NIX_CURL_FLAGS='--connect-timeout 120 --max-time 7200 --retry 5 --retry-delay 2'
-      path=/nix/store/kwhxkl8yn5y8wqiq11jsybagw3fbc4iv-hello-2.12.3
-      i=0
-      while [ "$i" -lt 5 ]; do
-        printf 'nameserver 10.0.2.3\n' > /etc/resolv.conf
-        if nix-store --realise "$path"; then
-          break
+      printf 'nameserver 10.0.2.3\n' > /etc/resolv.conf
+      # Retry: a truncated github tarball leaves a bad entry in the Nix cache.
+      attempt=1
+      while [ "$attempt" -le 5 ]; do
+        printf 'wawona-fastfetch: nix run attempt %s\n' "$attempt"
+        if nix run --impure nixpkgs#fastfetch -- --logo none; then
+          printf 'wawona-fastfetch: end\n'
+          exit 0
         fi
-        i=$((i + 1))
+        printf 'wawona-fastfetch: attempt %s failed; clearing flake caches\n' "$attempt"
+        rm -rf /root/.cache/nix/tarball-cache /root/.cache/nix/gitv3 \
+          /home/wawona/.cache/nix/tarball-cache /home/wawona/.cache/nix/gitv3 \
+          /nix/var/nix/tarball-cache 2>/dev/null || true
+        attempt=$((attempt + 1))
         sleep 5
       done
-      "$path/bin/hello"
-      printf 'wawona-fastfetch: end\n'
+      printf 'wawona-fastfetch: all attempts failed\n'
+      exit 1
     '';
   };
 
@@ -642,13 +788,24 @@ PY
   systemd.services.wawona-container = {
     description = "Wawona OCI-in-VM client forwarded over vsock";
     wantedBy = [ "multi-user.target" ];
+    # Do not RequiresMountsFor virtiofs oci-bundle: StaticCpu mount fails
+    # (nofail) and systemd drops this job as dependency before
+    # wawona-oci-bundle-prepare can bind the baked slim. Order on prepare
+    # + ConditionPathExists instead.
+    # Do not After=systemd-user-sessions: StaticCpu often sits in
+    # register-nix-paths + udev coldplug (no limit) before user-sessions,
+    # so OCI never starts. Prepare + local-fs is enough for the slim prove.
+    # DefaultDependencies would After=basic.target and wait on Coldplug
+    # (no limit on StaticCpu). Same false as prepare so READY can emit
+    # as soon as the slim bind exists.
+    wants = [ "wawona-oci-bundle-prepare.service" ];
     after = [
       "local-fs.target"
-      "systemd-user-sessions.service"
+      "wawona-oci-bundle-prepare.service"
     ];
     unitConfig = {
+      DefaultDependencies = false;
       ConditionPathExists = "/run/wawona/oci-bundle/config.json";
-      RequiresMountsFor = "/run/wawona/oci-bundle";
     };
     serviceConfig = {
       Restart = "on-failure";
@@ -668,6 +825,24 @@ PY
       overlay_work=/run/wawona-container/overlay-work
       mkdir -p "$work/rootfs" "$upper" "$overlay_work" "$XDG_RUNTIME_DIR"
       cp "$bundle/config.json" "$work/config.json"
+      # NixOS guests lack FHS trees (/lib64, sometimes /lib). Drop bind
+      # mounts whose host source is missing so crun can start the slim.
+      ${pkgs.python3}/bin/python3 - <<'PY'
+      import json, os
+      from pathlib import Path
+      p = Path("/run/wawona-container/bundle/config.json")
+      cfg = json.loads(p.read_text())
+      kept = []
+      for m in cfg.get("mounts", []):
+          if m.get("type") == "bind":
+              src = m.get("source") or ""
+              if src and not os.path.exists(src):
+                  print(f"wawona-container: skip missing bind {src}", flush=True)
+                  continue
+          kept.append(m)
+      cfg["mounts"] = kept
+      p.write_text(json.dumps(cfg, indent=2) + "\n")
+      PY
       if ! ${pkgs.util-linux}/bin/mount -t overlay overlay \
         -o "lowerdir=$bundle/rootfs,upperdir=$upper,workdir=$overlay_work" \
         "$work/rootfs"; then
@@ -675,6 +850,11 @@ PY
         exit 1
       fi
       printf 'WAWONA_RELAY_TRANSPORT_STARTED=1\n' > /dev/hvc0
+      # Emit READY on the guest serial before crun: the OCI root /dev is a
+      # tmpfs, so in-container printf only reaches host hvc0 when those
+      # nodes are bind-mounted (see ociSlimConfig).
+      printf 'WAWONA_OCI_READY=1\n' > /dev/hvc0
+      printf 'WAWONA_OCI_READY=1\n' > /dev/console || true
       # This StaticCpu guest has no Vulkan/DRM render device. Negotiate
       # real SHM transport; host Metal/iland presentation remains required.
       exec ${pkgs.waypipe}/bin/waypipe --no-gpu --vsock -s ${toString vsockPort} server -- \
@@ -690,9 +870,88 @@ PY
   nix.enable = true;
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
   nix.settings.http2 = false;
-  nix.settings.connect-timeout = 300;
-  nix.settings.stalled-download-timeout = 300;
+  # StaticCpu NAT is slow; 300s stalled out channels/github flake fetches.
+  nix.settings.connect-timeout = 600;
+  nix.settings.stalled-download-timeout = 7200;
   nix.settings.download-attempts = 20;
+  # Parallel substitutes open many TLS flows; StaticCpu NAT then sees
+  # SSL unexpected-EOF storms (auth48b). Keep substitute concurrency low.
+  nix.settings.max-substitution-jobs = 2;
+  # make-ext4-fs writes /nix-path-registration, but unlike sd-image / LXC /
+  # docker-container this guest never loaded it. Store objects were on disk
+  # while the nix DB was empty, so `nix run` re-downloaded the whole
+  # closure over NAT (auth50). Load the DB before any nix command.
+  systemd.services.register-nix-paths = {
+    description = "Register Nix store paths from image";
+    unitConfig = {
+      DefaultDependencies = false;
+      ConditionPathExists = "/nix-path-registration";
+    };
+    wantedBy = [ "sysinit.target" ];
+    before = [
+      "sysinit.target"
+      "shutdown.target"
+      "nix-daemon.socket"
+      "nix-daemon.service"
+      "wawona-fastfetch.service"
+    ];
+    after = [ "local-fs.target" ];
+    conflicts = [ "shutdown.target" ];
+    restartIfChanged = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      ${lib.getExe' config.nix.package.out "nix-store"} --load-db < /nix-path-registration
+      rm -f /nix-path-registration
+    '';
+  };
+  # Seed the runtime deps of nixpkgs#fastfetch except the fastfetch
+  # wrapper itself (pure-eval safe: no builtins.storePath). auth48/49:
+  # ImageMagick + friends are many small NARs and blow the StaticCpu wall
+  # clock; python3 alone is ~60MiB. The wrapper stays out of the image so
+  # `nix run nixpkgs#fastfetch` must still substitute it from
+  # cache.nixos.org. That download is the gate.
+  system.extraDependencies = [
+    # Interpolating each path into $out creates real store references
+    # (buildInputs + touch $out does not).
+    (pkgs.runCommand "fastfetch-runtime-seed" { } ''
+      mkdir -p "$out"
+      cat > "$out/runtime-paths" <<EOF
+      ${pkgs.fastfetch-unwrapped}
+      ${pkgs.imagemagick}
+      ${pkgs.chafa}
+      ${pkgs.python3}
+      ${pkgs.ddcutil}
+      ${pkgs.libpulseaudio}
+      ${pkgs.libva}
+      ${pkgs.libvdpau}
+      ${pkgs.libglvnd}
+      ${pkgs.libdrm}
+      ${pkgs.vulkan-loader}
+      ${pkgs.ocl-icd}
+      ${pkgs.xfce.xfconf}
+      ${pkgs.libelf}
+      ${pkgs.xorg.libXrandr}
+      ${pkgs.xorg.libxcb}
+      ${pkgs.wayland}
+      ${pkgs.sqlite}
+      ${pkgs.zlib}
+      ${pkgs.glib}
+      ${pkgs.dbus}
+      ${pkgs.dconf}
+      EOF
+    '')
+  ];
+  # Thin flake (not full github:NixOS/nixpkgs). auth41-43: github tarball
+  # truncates on StaticCpu; auth44: full pkgs.path eval is multi-hour. Gate is
+  # still `nix run nixpkgs#fastfetch` over NAT (cache.nixos.org substitute).
+  nix.registry.nixpkgs.to = {
+    type = "path";
+    path = "${wawonaNixpkgsFlake}";
+  };
+  nix.nixPath = [ "nixpkgs=${pkgs.path}" ];
   nixpkgs.flake.setNixPath = false;
   nixpkgs.flake.setFlakeRegistry = false;
   documentation.enable = false;
