@@ -128,6 +128,18 @@ N10 mode-a-present (live)
   requires defined MC typeinfo/dtor. SS rebuild in flight → ios-sim.
 - Completely complete still **0%**.
 
+### 2026-10-11 (N14 fix4b RED; fix5 DefaultDependencies)
+
+- fix4b (`xyhlp…`) prepare GREEN @gt≈267. Smoke **RED**: no
+  `WAWONA_OCI_READY` before 2400s. Stuck Coldplug udev (no limit);
+  container never started (DefaultDependencies After=basic).
+- fix: `DefaultDependencies=false` on `wawona-container` (unit proved
+  `5fb2p3my…`). Guest `/tmp/result-guest-n14-fix5` →
+  `39ghp51hg64wn6rlda6bd74b75j9m1x6`. Smoke fix5 started.
+- Relay `7a05c5e` + graph `1d3fa4d` on `development`. wwn-iland SS MC
+  `8d4a889` pushed; ninja still in LLVM buildPhase.
+- eio-fix AUTH/SHM still LIVE. Completely complete still **0%**.
+
 ### 2026-10-11 (N14 prepare GREEN; container After=basic)
 
 - tip smoke fix4b (`xyhlp2fr…`): prepare **bound slim** @gt≈267. virtiofs
