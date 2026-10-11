@@ -8,8 +8,8 @@ Progress log: append-only section at bottom. One node per session when heavy.
 Completely complete stays **0%** until Distribution (store IPA on device) is green.
 Twelve-gate judgment ~**75%** (N10b **done** on this tip boot: `READY=1` +
 `AUTH_OK=1` + SHM `5b6add91…` + **`Mode A SHM present 800x600`**).
-Next: N14 oci-live; N15 full (ANGLE minos + device IPA); N16 ASC.
-Do not revive Sept "boot EL1 from scratch".
+Next: N15 full (ios-sim link + ANGLE minos + device IPA); N16 ASC.
+N14 oci-live **GREEN** (fix6). Do not revive Sept "boot EL1 from scratch".
 
 ## Stop rule
 
@@ -29,10 +29,10 @@ STARDUST signing / ASC upload.
 | Automatic login | N7 autologin | partial |
 | Readiness | N8 auth-ready | **done** tip force-off smoke (`READY`+`AUTH_OK`) |
 | Wayland | N9 shm-import, N10a wiring, N10b live | N9 **done**; N10a **done**; N10b **done** (AUTH+SHM+Mode A present) |
-| Interaction | N11 touch-stop | **open** (live guest ready) |
+| Interaction | N11 touch-stop | **done** (Multi-Touch + park; eio AUTH kept) |
 | Page-size parity | N12 parity-16k | AUTH+frame+fastfetch **done** auth51 |
-| OCI lifecycle | N13 oci-host, N14 oci-live | host tests **done**; live crun **open** |
-| Distribution | N15 ipa-audit, N16 stardust-asc | **open** (last) |
+| OCI lifecycle | N13 oci-host, N14 oci-live | host tests **done**; N14 live **done** (fix6 READY) |
+| Distribution | N15 ipa-audit, N16 stardust-asc | N15 SS archive **done**; ios-sim link **in flight**; N16 **open** |
 
 ## Dependency graph
 
@@ -114,6 +114,19 @@ N10 mode-a-present (live)
 - Do not regress Relay Wasm Runtime
 
 ## Progress log
+
+### 2026-10-11 (N15 ios-sim: moltenvk 1.4.2)
+
+- `nix build .#wawona-ios-app-sim -o /tmp/result-ios-sim-n15` still
+  building. Stuck long on `moltenvk-ios-sim-1.4.2` (store has 1.4.1;
+  version bump). SPIRV-Tools-iOS compiling under host RAM pressure
+  (~15MB free; CoreSimulator ENOMEM soft-fail; competing `nix store
+  gc` not killable from this agent).
+- Flake pin `wwn-iland` `8d4a889`. SS archive still GREEN with
+  `MCDisassembler` defined.
+- eio-fix AUTH/SHM still LIVE (~9.3h). Do not kill.
+- Completely complete still **0%**. Next after ios-sim: ANGLE audit,
+  then N16 STARDUST/ASC.
 
 ### 2026-10-11 (N14 GREEN fix6)
 
