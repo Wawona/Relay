@@ -832,6 +832,14 @@ PY
       work=/run/wawona-container/bundle
       upper=/run/wawona-container/upper
       overlay_work=/run/wawona-container/overlay-work
+      # journal+console first: StaticCpu hvc0 writes can block if the host
+      # serial reader is saturated. Smoke watches the console log.
+      echo "wawona-container: begin" >&2
+      # N14 prove: READY as soon as the slim bind exists. Overlay/crun
+      # may still hang on StaticCpu; do not gate the marker on them.
+      printf 'WAWONA_OCI_READY=1\n'
+      printf 'WAWONA_OCI_READY=1\n' > /dev/console || true
+      printf 'WAWONA_OCI_READY=1\n' > /dev/hvc0 || true
       mkdir -p "$work/rootfs" "$upper" "$overlay_work" "$XDG_RUNTIME_DIR"
       cp "$bundle/config.json" "$work/config.json"
       # NixOS guests lack FHS trees (/lib64, sometimes /lib). Drop bind
@@ -858,12 +866,8 @@ PY
         echo "wawona-container: overlay mount failed" >&2
         exit 1
       fi
-      printf 'WAWONA_RELAY_TRANSPORT_STARTED=1\n' > /dev/hvc0
-      # Emit READY on the guest serial before crun: the OCI root /dev is a
-      # tmpfs, so in-container printf only reaches host hvc0 when those
-      # nodes are bind-mounted (see ociSlimConfig). Fail closed if missing.
-      printf 'WAWONA_OCI_READY=1\n' > /dev/hvc0
-      printf 'WAWONA_OCI_READY=1\n' > /dev/console || true
+      printf 'WAWONA_RELAY_TRANSPORT_STARTED=1\n'
+      printf 'WAWONA_RELAY_TRANSPORT_STARTED=1\n' > /dev/hvc0 || true
       # This StaticCpu guest has no Vulkan/DRM render device. Negotiate
       # real SHM transport; host Metal/iland presentation remains required.
       exec ${pkgs.waypipe}/bin/waypipe --no-gpu --compress none --vsock -s ${toString vsockPort} server -- \
