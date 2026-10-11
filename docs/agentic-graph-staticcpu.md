@@ -115,6 +115,17 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-11 (N14 GREEN fix6)
+
+- Smoke fix6 **GREEN**: `WAWONA_OCI_READY=1` after prepare @gt≈267,
+  container start @268, journal READY @≈279. Guest
+  `f0i1cmsccz1n63lfdhnvv62yiz5kgfal`. Log
+  `n14-oci-smoke-fix6.log` `oci=true`.
+- Path: bake slim → prepare bind → DefaultDependencies=false →
+  READY on journal before overlay/hvc0 (`8aa6070`).
+- N15 SS archive still GREEN. Next: ios-sim link + ANGLE; N16 ASC.
+- eio-fix AUTH/SHM kept. Completely complete still **0%**.
+
 ### 2026-10-11 (N15 SS GREEN; N14 fix5 hang; disk; fix6)
 
 - N15: `swiftshader-ios-sim` **GREEN**. Archive
