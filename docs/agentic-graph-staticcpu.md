@@ -91,7 +91,7 @@ rebuild for SHM while BUFFER_DIFF already arrives; no STARDUST before N10+N11.
 | N12 | 16k smoke: AUTH + SHM hash + `wawona-fastfetch: end` | auth51 already |
 | N13 | `cargo test -p relay-oci --lib` | exit 0 |
 | N14 | Guest crun create/start/stop with bundle (virtiofs or delivery) | journal `wawona-container` |
-| N15 | Store IPA: no MAP_JIT / HV ents; `assert_no_loose_dylibs` / Mode A audit scripts | exit 0 |
+| N15 | Store IPA: no MAP_JIT / HV ents; `assert_no_loose_dylibs` / Mode A audit scripts; sim: `scripts/gates/verify-n15-ios-sim-app.sh` | exit 0 |
 | N16 | Signed STARDUST boot + ASC processing evidence | human + logs |
 | N17 | Wasm smoke / link still ships on all targets | no regress |
 | N18 | Disk grow while stopped; marker survives | prior E4A1C0DE proof |
@@ -114,6 +114,18 @@ N10 mode-a-present (live)
 - Do not regress Relay Wasm Runtime
 
 ## Progress log
+
+### 2026-10-11 (N15 ios-sim n15b restart)
+
+- Prior ios-sim (~2h) **interrupted** mid moltenvk SPIRV-Tools arm64;
+  no `/tmp/result-ios-sim-n15`. Dual-arch x86_64+arm64 burned RAM.
+- wwn-iland `ad823e0`: MoltenVK sim `ONLY_ACTIVE_ARCH=arm64` on Apple
+  silicon. Wawona flake `81824be`. Restart
+  `.#wawona-ios-app-sim` → `/tmp/ios-sim-n15b.log`.
+- Gate ready: `Relay/scripts/gates/verify-n15-ios-sim-app.sh` (Mode A
+  sim + graphics bundle + no undefined `MCDisassembler`).
+- eio-fix AUTH/SHM still LIVE. Do not kill.
+- Completely complete still **0%**.
 
 ### 2026-10-11 (N15 ios-sim: moltenvk 1.4.2)
 
