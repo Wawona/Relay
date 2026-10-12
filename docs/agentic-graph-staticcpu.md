@@ -8,7 +8,7 @@ Progress log: append-only section at bottom. One node per session when heavy.
 Completely complete stays **0%** until Distribution (store IPA on device) is green.
 Twelve-gate judgment ~**75%** (N10b **done** on this tip boot: `READY=1` +
 `AUTH_OK=1` + SHM `5b6add91…` + **`Mode A SHM present 800x600`**).
-Next: N15 full (ios-sim link + ANGLE minos + device IPA); N16 ASC.
+Next: N16 STARDUST/ASC store IPA (N15 ios-sim + static ANGLE/SS **GREEN**).
 N14 oci-live **GREEN** (fix6). Do not revive Sept "boot EL1 from scratch".
 
 ## Stop rule
@@ -32,7 +32,7 @@ STARDUST signing / ASC upload.
 | Interaction | N11 touch-stop | **done** (Multi-Touch + park; eio AUTH kept) |
 | Page-size parity | N12 parity-16k | AUTH+frame+fastfetch **done** auth51 |
 | OCI lifecycle | N13 oci-host, N14 oci-live | host tests **done**; N14 live **done** (fix6 READY) |
-| Distribution | N15 ipa-audit, N16 stardust-asc | N15 SS archive **done**; ios-sim link **in flight**; N16 **open** |
+| Distribution | N15 ipa-audit, N16 stardust-asc | N15 ios-sim gate **GREEN**; N16 **open** |
 
 ## Dependency graph
 
@@ -115,15 +115,46 @@ N10 mode-a-present (live)
 
 ## Progress log
 
-### 2026-10-11 (N15 ANGLE minos RED on eio tip)
 
-- Live eio tip `Wawona-n11-eio-fix.app`: Mode A sim audit **RED**.
-  `Frameworks/libEGL.dylib` / `libGLESv2.dylib` `minos 16.0` sdk 18.5
-  (prebuilt ANGLE). Sim Mode A max floor 14.0.
-- Also ships loose `libEGL.dylib` + `libEGL.framework` (ASC loose-dylib
-  class). n15b must embed source-built ANGLE at deploymentTarget 13/14
-  and prefer framework-only (no flat dylib) for store path.
-- Keep eio for AUTH/SHM; do not treat its ANGLE floor as N15 GREEN.
+### 2026-10-11 (N15 ios-sim GREEN: content-hash SS)
+
+- wwn-iland `9ca3fb4`: static ICD merge by content hash (not basename
+  keep-largest). Keeps Reactor `rr::warn` / `sw::freeMemory` beside LLVM.
+- Wawona `6a52107`: consumer content-hash dedupe + archive/`-u` (no
+  `force_load`; that duplicated ASTC vs ANGLE).
+- Artifact: `/tmp/result-ios-sim-n15` → `verify-n15-ios-sim-app.sh` **GREEN**
+  (static ANGLE, SS ICD, no libEGL.dylib).
+- Next: N16 STARDUST/ASC store IPA. Completely complete still 0%.
+
+### 2026-10-11 (N15 n15b: moltenvk GREEN → SwiftShader)
+
+- `moltenvk-ios-sim-1.4.2` **BUILD SUCCEEDED** (arm64-only).
+- Next drv: `swiftshader-ios-sim-static` configure done, buildPhase
+  LIVE. Then app link + static ANGLE (no dylib).
+- eio tip dead (AUTH/SHM already GREEN). Sim shutdown for RAM.
+- Completely complete still **0%**.
+
+### 2026-10-11 (N15 n15b: SPIRV-Cross → ShaderConverter)
+
+- n15b LIVE past SPIRV-Tools / SPIRV-Cross into
+  **MoltenVKShaderConverter-iOS**.
+- eio AUTH tip process **died** after ~9.5h (AUTH/SHM already GREEN).
+- Static ANGLE only (no dylib). Gate rejects ANGLE embeds.
+- Completely complete still **0%**.
+
+### 2026-10-11 (N15 ANGLE: static only, no dylib)
+
+- RAG (`ios-min-os`): App Store / Mode A Apple-mobile ship **no product
+  `.dylib`**. Link static archives. Sole dylib exception elsewhere:
+  macOS `.#wawona-macos-desktop-host` Mode B `libwayland-mac.dylib`.
+- ANGLE ownership: L1 `wwn-iland`. Source GN already builds
+  `libEGL.a` / `libGLESv2.a` (`link-kind=static`, minos 14.0 store
+  `…-angle-ios-simulator-7258`). `xcodegen` embed phase no-ops when
+  not dylib. Do **not** revive XCSoar prebuilt dylib path.
+- eio tip had obsolete `Frameworks/libEGL.dylib` minos 16.0 (prebuilt).
+  N15 GREEN needs n15b tip with zero ANGLE dylib/framework embeds.
+- Gate: `verify-n15-ios-sim-app.sh` now fails on any embedded ANGLE
+  dylib/framework.
 - Completely complete still **0%**.
 
 ### 2026-10-11 (N15 ios-sim n15b restart)
