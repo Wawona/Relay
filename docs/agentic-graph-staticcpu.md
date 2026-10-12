@@ -115,6 +115,15 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-11 (N16: nix IPA eval RED; Fastlane path)
+
+- `nix build --impure .#wawona-ios-ipa` **RED**: `build-app.nix` release
+  assert wants `certificateFile` / profile / identity. `matchHostSigning`
+  alone does not satisfy that assert. Ship path stays Fastlane
+  (`./scripts/release-env.sh fastlane ios github_ipa`), same as
+  `Ship: GitHub assets` / release.yml.
+- N15a sources **PARTIAL_OK**. Completely complete still **0%**.
+- Dev tip on STARDUST (plain toolbar) is not Distribution evidence.
 
 ### 2026-10-11 (N15 ios-sim GREEN: content-hash SS)
 
