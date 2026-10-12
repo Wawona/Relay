@@ -16,8 +16,11 @@ root="$1"
 }
 
 # Nix result symlink may point at a directory that contains Wawona.app.
+# Prefer fixed paths: find(1) can fail under process pressure (posix_spawn).
 app="$root"
-if [[ -d "$root" && ! -f "$root/Info.plist" ]]; then
+if [[ -d "$root/Wawona.app" ]]; then
+  app="$root/Wawona.app"
+elif [[ -d "$root" && ! -f "$root/Info.plist" ]]; then
   found="$(find "$root" -maxdepth 3 -name 'Wawona.app' -type d 2>/dev/null | head -1 || true)"
   if [[ -n "$found" ]]; then
     app="$found"
@@ -28,7 +31,14 @@ fi
   exit 1
 }
 
-exe="$(find "$app" -maxdepth 2 -type f -name 'Wawona' | head -1 || true)"
+exe=""
+if [[ -f "$app/Wawona" ]]; then
+  exe="$app/Wawona"
+elif [[ -f "$root/Wawona.app/Wawona" ]]; then
+  exe="$root/Wawona.app/Wawona"
+else
+  exe="$(find "$app" -maxdepth 2 -type f -name 'Wawona' 2>/dev/null | head -1 || true)"
+fi
 [[ -n "$exe" && -f "$exe" ]] || {
   echo "Wawona executable missing in $app" >&2
   exit 1
@@ -47,6 +57,26 @@ else
   fi
 fi
 echo "N15: no undefined MCDisassembler"
+
+# Mode A Apple-mobile: ANGLE is static archives only. Never ship or embed
+# libEGL.dylib / libGLESv2.dylib (XCSoar prebuilt escape hatch, minos 16).
+# xcodegen embed phase must no-op when link-kind=static.
+loose_egl="$(find "$app" -name 'libEGL.dylib' 2>/dev/null | head -5 || true)"
+loose_gles="$(find "$app" -name 'libGLESv2.dylib' 2>/dev/null | head -5 || true)"
+if [[ -n "$loose_egl" || -n "$loose_gles" ]]; then
+  echo "N15 RED: ANGLE dylib in bundle (static libEGL.a / libGLESv2.a required)" >&2
+  printf '%s\n' $loose_egl $loose_gles >&2
+  exit 1
+fi
+# Framework-wrapped ANGLE dylibs are the same reject class for Mode A.
+fw_egl="$(find "$app" -path '*/libEGL.framework/libEGL' 2>/dev/null | head -5 || true)"
+fw_gles="$(find "$app" -path '*/libGLESv2.framework/libGLESv2' 2>/dev/null | head -5 || true)"
+if [[ -n "$fw_egl" || -n "$fw_gles" ]]; then
+  echo "N15 RED: ANGLE framework binary in bundle (link static .a; no embed)" >&2
+  printf '%s\n' $fw_egl $fw_gles >&2
+  exit 1
+fi
+echo "N15: no ANGLE dylib / framework embed"
 
 wawona_root="$(cd "$(dirname "$0")/../../.." && pwd)/Wawona"
 modeb="$wawona_root/.github/scripts/verify-ios-modeb-artifacts.sh"
