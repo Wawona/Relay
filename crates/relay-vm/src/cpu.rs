@@ -188,6 +188,13 @@ impl StaticCpu {
         self.translate(address, crate::mmu::AccessType::Read, 1)
             .map_err(|fault| fault.error)
     }
+
+    /// Offline AOT maps a profiled VA onto a guest physical address.
+    /// Available to the `aot-translate` path; not a store runtime API.
+    #[cfg(any(test, feature = "aot-translate"))]
+    pub(crate) fn physical_for_aot(&self, address: u64) -> Result<u64, RelayError> {
+        self.physical(address)
+    }
     fn translate(
         &self,
         address: u64,
@@ -471,7 +478,15 @@ impl StaticCpu {
         for step in 0..budget {
             // Host stream arrivals must progress even while the guest performs
             // no MMIO writes. Bound polling work independently of run budget.
-            if step & 4095 == 0 {
+            // When vsock has active flows (session dial / waypipe), service
+            // every 256 steps so REQUEST/ACCEPT cannot starve for a full 4K
+            // slice (Mode A gt≈482 StaticCpu stall class).
+            let service_mask: u64 = if self.bus.vsock_needs_poll() {
+                255
+            } else {
+                4095
+            };
+            if step & service_mask == 0 {
                 self.bus.service(&mut self.memory)?;
             }
             self.step().map_err(|error| {

@@ -8,13 +8,53 @@ use crate::guest_session::frame_hash;
 use crate::vsock::VsockConnection;
 use relay_core::RelayError;
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+fn open_debug_log(path: &Path) -> Option<std::fs::File> {
+    // Host agents sometimes leave 0644 files in the sim container tmp; the
+    // sandbox then gets EACCES on append and SHM/TX evidence vanishes. Prefer
+    // create mode 0666; on failure remove and retry once.
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true).mode(0o666);
+    match opts.open(path) {
+        Ok(file) => Some(file),
+        Err(_) => {
+            let _ = std::fs::remove_file(path);
+            opts.open(path).ok()
+        }
+    }
+}
+
+pub(crate) fn shm_debug_log(line: &str) {
+    // Fallible stderr only. eprintln! panics on EIO (broken simctl PTY) and
+    // that panic was killing StaticCpu at the Mode A session dial (gt≈482).
+    let _ = writeln!(std::io::stderr(), "{line}");
+    // TMPDIR first: iOS Simulator often cannot create host /tmp files from
+    // the app sandbox; app-container tmp is reliable. Then XDG, then /tmp.
+    let mut paths = Vec::new();
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        paths.push(PathBuf::from(tmp).join("relay-shm.log"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
+        paths.push(PathBuf::from(xdg).join("relay-shm.log"));
+    }
+    paths.push(PathBuf::from("/tmp/relay-shm.log"));
+    for path in paths {
+        if let Some(mut file) = open_debug_log(&path) {
+            let _ = writeln!(file, "{line}");
+            let _ = file.sync_all();
+        }
+    }
+}
 
 const WMSG_PROTOCOL: u32 = 0;
 const WMSG_OPEN_FILE: u32 = 2;
@@ -33,6 +73,8 @@ pub struct ImportedFrame {
 
 pub(crate) struct Importer {
     thread: Option<JoinHandle<()>>,
+    /// Set before listen log; cleared on thread exit. Parent fail-closes if unset.
+    alive: Arc<AtomicBool>,
 }
 
 impl Importer {
@@ -42,32 +84,63 @@ impl Importer {
         vm_state: Arc<AtomicU8>,
         frame: Arc<Mutex<Option<ImportedFrame>>>,
     ) -> Result<Self, RelayError> {
+        let alive = Arc::new(AtomicBool::new(false));
+        let alive_w = Arc::clone(&alive);
         let thread = thread::Builder::new()
             .name("relay-shm-import".into())
             .spawn(move || {
+                // N10b-green accept shape: gate on vm_state==0 and run
+                // import_stream inline. N11 experiments used a helper thread
+                // and dropped the gate; A/B vs that tip is in flight. Keep
+                // listen log + VERSION-skip; restore this loop for bisect.
+                alive_w.store(true, Ordering::Release);
+                shm_debug_log("Relay SHM import: accept loop listening on vsock 1024");
                 while !stop.load(Ordering::Acquire) && vm_state.load(Ordering::Acquire) == 0 {
                     match connections.recv_timeout(Duration::from_millis(20)) {
                         Ok(connection) => {
-                            eprintln!(
+                            shm_debug_log(&format!(
                                 "Relay SHM import: accepted vsock guest_port={} host_port={}",
                                 connection.guest_port, connection.host_port
-                            );
+                            ));
                             // Keep the waypipe stream open after the first
                             // imported frame. Closing it kills the guest
                             // session and races AUTH (systemctl exit 3).
                             if let Err(error) = import_stream(connection.stream, &stop, &frame) {
-                                eprintln!("Relay SHM import: {error}");
+                                shm_debug_log(&format!("Relay SHM import: {error}"));
+                            } else {
+                                shm_debug_log("Relay SHM import: stream ended ok");
                             }
                         }
                         Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => return,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            shm_debug_log(
+                                "Relay SHM import: vsock listener disconnected; importer exit",
+                            );
+                            break;
+                        }
                     }
                 }
+                alive_w.store(false, Ordering::Release);
+                shm_debug_log("Relay SHM import: accept loop exit");
             })
             .map_err(|error| RelayError::Failed(format!("cannot start SHM importer: {error}")))?;
+        // Fail closed if the accept thread dies before listen (claim tip had
+        // rc=0 with no relay-shm-import thread and empty relay-shm.log).
+        thread::sleep(Duration::from_millis(50));
+        if !alive.load(Ordering::Acquire) {
+            let _ = thread.join();
+            return Err(RelayError::Failed(
+                "SHM importer accept thread exited before listen".into(),
+            ));
+        }
         Ok(Self {
             thread: Some(thread),
+            alive,
         })
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 
     pub(crate) fn join_until(
@@ -216,7 +289,7 @@ fn publish_frame(sink: &Mutex<Option<ImportedFrame>>, frame: ImportedFrame) {
     if already.is_some() {
         return;
     }
-    eprintln!(
+    shm_debug_log(&format!(
         "Relay imported SHM frame: {}x{} sha256={}",
         frame.width,
         frame.height,
@@ -225,7 +298,7 @@ fn publish_frame(sink: &Mutex<Option<ImportedFrame>>, frame: ImportedFrame) {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
-    );
+    ));
     if let Ok(mut guard) = sink.lock() {
         *guard = Some(frame);
     }
@@ -236,11 +309,15 @@ fn import_stream(
     stop: &AtomicBool,
     sink: &Mutex<Option<ImportedFrame>>,
 ) -> Result<(), RelayError> {
+    // StaticCpu can starve the host for hundreds of ms. A 250ms write
+    // timeout made write_all fail while we still returned Ok(()) from
+    // write_protocol / write_ack (errors discarded). Guest then saw an
+    // empty registry ("No wl_shm global") and the next dial got ECONNRESET.
     stream
         .set_read_timeout(Some(Duration::from_millis(250)))
         .ok();
     stream
-        .set_write_timeout(Some(Duration::from_millis(250)))
+        .set_write_timeout(Some(Duration::from_millis(2_000)))
         .ok();
     // Guest `waypipe server` writes a 16-byte connection header first
     // (4-byte flags + 12 unused). Treating that as WMSG desyncs the stream.
@@ -252,7 +329,24 @@ fn import_stream(
             "waypipe connection header rejected lead={lead:#010x}"
         )));
     }
-    eprintln!("Relay SHM import: connection header lead={lead:#010x}");
+    shm_debug_log(&format!(
+        "Relay SHM import: connection header lead={lead:#010x}"
+    ));
+    // N10b green tip did not send Version; tip matrix after that (version-send)
+    // stayed RED with No wl_shm + ECONNRESET. Default: accept peer Version only
+    // (never echo). Opt in to display-side initiate with WWN_WAYPIPE_SEND_VERSION=1.
+    if std::env::var_os("WWN_WAYPIPE_SEND_VERSION").is_some() {
+        const WAYPIPE_WIRE_VERSION: u32 = 0x11;
+        let mut out = [0u8; 8];
+        out[0..4].copy_from_slice(&header(8, WMSG_VERSION).to_le_bytes());
+        out[4..8].copy_from_slice(&WAYPIPE_WIRE_VERSION.to_le_bytes());
+        write_exact_interruptible(&mut stream, &out, stop)?;
+        shm_debug_log(&format!(
+            "Relay SHM import: VERSION sent wire={WAYPIPE_WIRE_VERSION:#x}"
+        ));
+    } else {
+        shm_debug_log("Relay SHM import: VERSION send skipped (N10b-compatible)");
+    }
     let mut files: BTreeMap<i32, Vec<u8>> = BTreeMap::new();
     let mut compositor = MiniCompositor::new();
     let mut received = 0u32;
@@ -275,7 +369,9 @@ fn import_stream(
         let word = u32::from_le_bytes(hdr);
         let (size, kind) = parse_header(word);
         if received < 64 {
-            eprintln!("Relay SHM import: wmsg n={received} word={word:#010x} size={size} kind={kind}");
+            shm_debug_log(&format!(
+                "Relay SHM import: wmsg n={received} word={word:#010x} size={size} kind={kind}"
+            ));
         }
         if !wmsg_size_accepted(size) {
             return Err(RelayError::Failed(format!(
@@ -287,14 +383,33 @@ fn import_stream(
         read_exact_interruptible(&mut stream, &mut buf, stop)?;
         received = received.saturating_add(1);
         match kind {
-            WMSG_VERSION => {}
-            WMSG_INJECT_RIDS => {}
+            WMSG_VERSION => {
+                // waypipe-rs: only the *client* sends Version (must be first).
+                // Host MiniCompositor is the display side: accept and record,
+                // never echo. Echoing a Version to a guest `waypipe server`
+                // fails with "waypipe-server should not send Version" /
+                // "must be the first" and yields empty registry (No wl_shm).
+                let ver = if buf.len() >= 4 {
+                    u32::from_le_bytes(buf[0..4].try_into().unwrap())
+                } else {
+                    1
+                };
+                shm_debug_log(&format!(
+                    "Relay SHM import: VERSION peer={ver} (accept, no echo)"
+                ));
+            }
+            WMSG_INJECT_RIDS => {
+                shm_debug_log(&format!(
+                    "Relay SHM import: INJECT_RIDS bytes={}",
+                    buf.len()
+                ));
+            }
             WMSG_OPEN_FILE if buf.len() >= 8 => {
                 let remote = i32::from_le_bytes(buf[0..4].try_into().unwrap());
                 let file_size = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
-                eprintln!(
+                shm_debug_log(&format!(
                     "Relay SHM import: OPEN_FILE remote={remote} bytes={file_size}"
-                );
+                ));
                 files.insert(remote, vec![0; file_size.min(32 * 1024 * 1024)]);
             }
             WMSG_BUFFER_DIFF if buf.len() >= 12 => {
@@ -319,14 +434,20 @@ fn import_stream(
             }
             WMSG_PROTOCOL => {
                 compositor.feed(&buf, &files)?;
-                for reply in compositor.drain_protocol() {
-                    write_protocol(&mut stream, &reply)?;
+                let replies = compositor.drain_protocol();
+                shm_debug_log(&format!(
+                    "Relay SHM import: PROTOCOL in={} replies={}",
+                    buf.len(),
+                    replies.len()
+                ));
+                for reply in replies {
+                    write_protocol(&mut stream, &reply, stop)?;
                 }
             }
             _ => {}
         }
         if waypipe_needs_ack(kind) {
-            let _ = write_ack(&mut stream, received);
+            write_ack(&mut stream, received, stop)?;
         }
         if let Some(frame) = compositor.take_frame() {
             publish_frame(sink, frame);
@@ -371,21 +492,58 @@ fn apply_buffer_diff(file: &mut [u8], rest: &[u8]) -> Result<(), RelayError> {
     Ok(())
 }
 
-fn write_ack(stream: &mut UnixStream, messages: u32) -> Result<(), RelayError> {
+fn write_ack(
+    stream: &mut UnixStream,
+    messages: u32,
+    stop: &AtomicBool,
+) -> Result<(), RelayError> {
     let mut out = [0u8; 8];
     out[0..4].copy_from_slice(&header(8, WMSG_ACK_NBLOCKS).to_le_bytes());
     out[4..8].copy_from_slice(&messages.to_le_bytes());
-    let _ = stream.write_all(&out);
-    Ok(())
+    write_exact_interruptible(stream, &out, stop)
 }
 
-fn write_protocol(stream: &mut UnixStream, proto: &[u8]) -> Result<(), RelayError> {
+fn write_protocol(
+    stream: &mut UnixStream,
+    proto: &[u8],
+    stop: &AtomicBool,
+) -> Result<(), RelayError> {
     let size = 4 + proto.len();
     let padded = align4(size);
     let mut out = vec![0u8; padded];
     out[0..4].copy_from_slice(&header(size as u32, WMSG_PROTOCOL).to_le_bytes());
     out[4..4 + proto.len()].copy_from_slice(proto);
-    let _ = stream.write_all(&out);
+    write_exact_interruptible(stream, &out, stop)
+}
+
+fn write_exact_interruptible(
+    stream: &mut UnixStream,
+    buf: &[u8],
+    stop: &AtomicBool,
+) -> Result<(), RelayError> {
+    let mut sent = 0;
+    while sent < buf.len() {
+        if stop.load(Ordering::Acquire) {
+            return Err(RelayError::Failed("SHM import stopped".into()));
+        }
+        match stream.write(&buf[sent..]) {
+            Ok(0) => {
+                return Err(RelayError::Failed("waypipe write returned 0".into()));
+            }
+            Ok(n) => sent += n,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+                    || error.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                // Peer credit / StaticCpu scheduling: retry until stop.
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => {
+                return Err(RelayError::Failed(format!("waypipe write: {error}")));
+            }
+        }
+    }
     Ok(())
 }
 

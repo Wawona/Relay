@@ -34,11 +34,13 @@ On proof machine `E4A1C0DE` / guest `guest-4k-auth10` (auth18 log):
 - `Relay imported SHM frame: 800x600 sha256=5b6add912fb4447127f249f8f924379f8928e81f6fc5fc6ed4cf3d694a7379c3`
 - OPEN_FILE remote=1 bytes=15000000 before the frame
 - Prior auth16/17 also had `WAWONA_RELAY_AUTH_OK=1` and `dns ok`
-- `nix run` / `wawona-fastfetch: end` still open (TLS EOF on prior boots)
+- auth39 (`guest-4k-auth24`, log `guest-4k-auth39-smoke.log`, smoke exit 0): NAT HTTPS works (`StoreDir`, hello realise). That is not the package gate. Required next: guest runs `nix run nixpkgs#fastfetch` and prints `wawona-fastfetch: end`
 
 Formal: `verify-formal.sh` `FORMAL_OK`, 37 Kani harnesses, 0 failures, stamp
 digest `0e20b45b2e06b209a37888048e2a5b9aad479a866f60efa473d0ff05afa23628`.
 Helper cargo tests `shm_import`, `aot`, `net_host` pass after that stamp.
+`relay_copy_frame` serves `take_imported_frame`. Mode A starts
+`relay_start_shm_importer` and presents BGRA via `IlandPresentEngine`.
 Named helpers only. Disk grow/restart with guest marker already passed on this
 machine. READY without AUTH still rejected. AUTH without an imported frame
 still fails the Wayland gate. Simulator is not distribution.

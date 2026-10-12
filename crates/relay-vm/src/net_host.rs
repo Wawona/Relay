@@ -21,6 +21,7 @@ static NET_SYNACK_DROP: AtomicU64 = AtomicU64::new(0);
 static NET_RST: AtomicU64 = AtomicU64::new(0);
 static NET_HOST_TX: AtomicU64 = AtomicU64::new(0);
 static NET_HOST_RX: AtomicU64 = AtomicU64::new(0);
+static NET_DATA_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub fn nat_counters() -> (u64, u64, u64, u64, u64, u64) {
     (
@@ -46,6 +47,8 @@ pub fn nat_io_counters() -> (u64, u64) {
 struct OutQueues {
     prio: SyncSender<Vec<u8>>,
     data: SyncSender<Vec<u8>>,
+    /// Frames sitting in the data sync_channel waiting for virtio drain.
+    data_depth: Arc<AtomicU64>,
 }
 
 impl OutQueues {
@@ -54,7 +57,17 @@ impl OutQueues {
     }
 
     fn send_data(&self, frame: Vec<u8>) -> bool {
-        self.data.try_send(frame).is_ok()
+        match self.data.try_send(frame) {
+            Ok(()) => {
+                self.data_depth.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn data_depth(&self) -> u64 {
+        self.data_depth.load(Ordering::Relaxed)
     }
 }
 use std::sync::Arc;
@@ -108,6 +121,7 @@ pub(crate) struct Worker {
     to_worker: Option<Sender<Vec<u8>>>,
     from_prio: Receiver<Vec<u8>>,
     from_data: Receiver<Vec<u8>>,
+    data_depth: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
@@ -120,15 +134,20 @@ impl Worker {
         let (to_worker, incoming) = mpsc::channel();
         // DNS replies ride a priority queue so TCP retransmit backlog cannot
         // starve resolv after a slow HTTPS transfer (auth21-23 failure mode).
-        let (prio_tx, from_prio) = mpsc::sync_channel(256);
-        let (data_tx, from_data) = mpsc::sync_channel(4096);
+        // Deep enough for a github:NixOS/nixpkgs tarball under StaticCpu
+        // (auth41: 4096 filled, drain CAP=128 then pop_back truncated tar).
+        let (prio_tx, from_prio) = mpsc::sync_channel(512);
+        let (data_tx, from_data) = mpsc::sync_channel(16_384);
+        let data_depth = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_worker = Arc::clone(&stop);
-        let join = thread::spawn(move || run(incoming, prio_tx, data_tx, stop_worker));
+        let depth_worker = Arc::clone(&data_depth);
+        let join = thread::spawn(move || run(incoming, prio_tx, data_tx, depth_worker, stop_worker));
         Self {
             to_worker: Some(to_worker),
             from_prio,
             from_data,
+            data_depth,
             stop,
             join: Some(join),
         }
@@ -141,44 +160,32 @@ impl Worker {
     }
 
     pub(crate) fn drain(&self, out: &mut VecDeque<Vec<u8>>) {
-        // Keep the virtio RX staging queue short. auth24 showed ~124B guest
-        // ingress (one DNS reply) while SYN-ACK sat behind a bloated deque.
-        const CAP: usize = 128;
-        let mut prio = Vec::new();
-        while prio.len() < CAP {
+        // auth24 wanted a short staging queue so SYN-ACK was not buried.
+        // auth41 proved the opposite failure: CAP=128 plus pop_back of TCP
+        // data to admit DNS truncated the github:NixOS/nixpkgs tarball
+        // (`Truncated tar archive`) during `nix run nixpkgs#fastfetch`.
+        // Keep a deep queue, prefer priority at the head, and never discard
+        // a data frame. Host sockets already back-pressure when the data
+        // sync_channel is full (send_tcp returns false).
+        const CAP: usize = 2048;
+        const PRIO_SLACK: usize = 64;
+        while out.len() < CAP + PRIO_SLACK {
             match self.from_prio.try_recv() {
-                Ok(frame) => prio.push(frame),
+                Ok(frame) => out.push_front(frame),
                 Err(_) => break,
             }
-        }
-        // Oldest priority first at the head.
-        for frame in prio.into_iter().rev() {
-            if out.len() >= CAP {
-                let _ = out.pop_back();
-            }
-            out.push_front(frame);
         }
         while out.len() < CAP {
             match self.from_data.try_recv() {
-                Ok(frame) => out.push_back(frame),
+                Ok(frame) => {
+                    let _ = self.data_depth.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |depth| Some(depth.saturating_sub(1)),
+                    );
+                    out.push_back(frame);
+                }
                 Err(_) => break,
-            }
-        }
-        // If the staging queue is still full, drop data to admit DNS/ICMP.
-        loop {
-            if out.len() < CAP {
-                match self.from_prio.try_recv() {
-                    Ok(frame) => out.push_front(frame),
-                    Err(_) => break,
-                }
-            } else {
-                match self.from_prio.try_recv() {
-                    Ok(frame) => {
-                        let _ = out.pop_back();
-                        out.push_front(frame);
-                    }
-                    Err(_) => break,
-                }
             }
         }
     }
@@ -225,6 +232,10 @@ struct TcpFlow {
     synack_retries: u16,
     pending_out: Vec<u8>,
     phase: Phase,
+    /// One log when the guest advertises less than MSS. auth38 kept
+    /// inflating that to 1460, the guest dropped the segment, and dup ACKs
+    /// retransmitted it forever (window=1460, ack frozen, inflight ~130KB).
+    small_window_logged: bool,
 }
 
 struct UdpFlow {
@@ -254,12 +265,17 @@ fn run(
     incoming: Receiver<Vec<u8>>,
     prio: SyncSender<Vec<u8>>,
     data: SyncSender<Vec<u8>>,
+    data_depth: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
 ) {
     let mut tcp = Vec::<TcpFlow>::new();
     let mut udp = Vec::<UdpFlow>::new();
     let mut isn = 0x1000_0000u32;
-    let out = OutQueues { prio, data };
+    let out = OutQueues {
+        prio,
+        data,
+        data_depth,
+    };
     while !stop.load(Ordering::Relaxed) {
         while let Ok(frame) = incoming.try_recv() {
             on_frame(&mut tcp, &mut udp, &out, &mut isn, &frame);
@@ -395,6 +411,7 @@ fn on_tcp(
             synack_retries: 0,
             pending_out: Vec::new(),
             phase: Phase::SynReceived,
+            small_window_logged: false,
         };
         let _ = send_syn_ack(outgoing, &mut flow);
         tcp.push(flow);
@@ -574,15 +591,25 @@ fn poll_io(tcp: &mut Vec<TcpFlow>, udp: &mut Vec<UdpFlow>, outgoing: &OutQueues)
     // Map poll slot -> tcp index for flows that already have a host fd.
     let mut tcp_poll_index = Vec::new();
     let mut polls = Vec::with_capacity(tcp.len() + udp.len());
+    // Pause host reads when virtio already has a deep backlog. auth42: reading
+    // while SPI 67 starved NAPI let github reset mid-tarball.
+    const DATA_DEPTH_PAUSE: u64 = 512;
+    let pause_host_rx = outgoing.data_depth() >= DATA_DEPTH_PAUSE;
     for (index, flow) in tcp.iter().enumerate() {
         if flow.fd < 0 {
             continue;
         }
-        let events = if flow.phase == Phase::Connecting || !flow.pending_out.is_empty() {
-            POLLIN | POLLOUT
-        } else {
-            POLLIN
-        };
+        let mut events = 0i16;
+        if !pause_host_rx {
+            events |= POLLIN;
+        }
+        if flow.phase == Phase::Connecting || !flow.pending_out.is_empty() {
+            events |= POLLOUT;
+        }
+        // Always register open fds so pause_host_rx still runs pump_to_guest.
+        if events == 0 {
+            events = POLLOUT;
+        }
         tcp_poll_index.push(index);
         polls.push(PollFd {
             fd: flow.fd,
@@ -772,10 +799,20 @@ fn note_ack(flow: &mut TcpFlow, view: &crate::net_frame::TcpView<'_>) {
     if (view.flags & TCP_ACK) == 0 {
         return;
     }
+    let prev_window = flow.guest_window;
     flow.guest_window = u32::from(view.window) << flow.window_scale;
     let delta = view.ack.wrapping_sub(flow.una);
     if delta == 0 {
-        if flow.queued > 0 {
+        // A larger window with the same ACK is a window update. Bytes past
+        // una were not accepted, so rewind and let pump resend what fits.
+        // A closed window is not a loss signal (auth38 dup-ACK storm).
+        if flow.guest_window > prev_window {
+            flow.queued = 0;
+            flow.dup_acks = 0;
+            flow.our_next = flow.una;
+            return;
+        }
+        if flow.queued > 0 && flow.guest_window > 0 {
             flow.dup_acks = flow.dup_acks.saturating_add(1);
             if flow.dup_acks >= 3 {
                 flow.queued = 0;
@@ -807,23 +844,54 @@ fn note_ack(flow: &mut TcpFlow, view: &crate::net_frame::TcpView<'_>) {
 }
 
 fn receive_cap(flow: &TcpFlow) -> usize {
-    (flow.guest_window.max(1460) as usize).min(128 * 1024)
+    // auth42: 128 KiB ahead of a StaticCpu guest let github CDN race far past
+    // virtio RX. Keep at most a few MSS buffered until the guest ACKs.
+    let window = flow.guest_window as usize;
+    if window == 0 {
+        0
+    } else {
+        window.min(8 * 1460).max(1460.min(window))
+    }
 }
 
 fn pump_to_guest(outgoing: &OutQueues, flow: &mut TcpFlow) {
     if !matches!(flow.phase, Phase::Open | Phase::Closing) {
         return;
     }
-    // 128-byte payloads stay in the same virtio RX buffer class as DNS and
-    // SYN-ACK. A 1460-byte segment was completed into the used ring (rx del
-    // rose, IRQ 67 was taken) and the guest IP stack still counted ~124 bytes.
-    let chunk = usize::from(flow.mss).clamp(1, 128);
-    let window = (flow.guest_window.max(chunk as u32) as usize).min(64 * 1024);
-    if flow.queued == 0 && !flow.inflight.is_empty() {
+    // The first RX descriptor is 2560 bytes (auth35). A full MSS fits.
+    // Never advertise more than the guest window. auth38 used max(mss), so a
+    // closed window still sent 1460-byte segments. The guest dropped them
+    // and dup-ACKed the same sequence while nix was copying glibc.
+    let window = (flow.guest_window as usize).min(64 * 1024);
+    if window == 0 {
+        if flow.queued == 0 && !flow.inflight.is_empty() {
+            flow.idle_polls = flow.idle_polls.saturating_add(1);
+            if flow.idle_polls >= 10_000 {
+                flow.idle_polls = 0;
+                let seq = flow.una;
+                let byte = [flow.inflight[0]];
+                if send_tcp(outgoing, flow, seq, TCP_ACK, &byte) {
+                    flow.queued = 1;
+                    flow.our_next = seq.wrapping_add(1);
+                }
+            }
+        }
+        return;
+    }
+    let chunk = usize::from(flow.mss).clamp(1, 1460).min(window);
+    if flow.guest_window < u32::from(flow.mss) && !flow.small_window_logged {
+        flow.small_window_logged = true;
         eprintln!(
-            "relay-net: pump :{} window={} inflight={} chunk={}",
-            flow.guest_port, window, flow.inflight.len(), chunk
+            "relay-net: window :{} adv={} inflight={} chunk={}",
+            flow.guest_port,
+            flow.guest_window,
+            flow.inflight.len(),
+            chunk
         );
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+    if flow.guest_window >= u32::from(flow.mss) {
+        flow.small_window_logged = false;
     }
     while flow.queued < flow.inflight.len() && flow.queued < window {
         let start = flow.queued;
@@ -845,7 +913,13 @@ fn retransmit_head(outgoing: &OutQueues, flow: &TcpFlow) {
     if flow.inflight.is_empty() {
         return;
     }
-    let end = usize::from(flow.mss).clamp(1, 128).min(flow.inflight.len());
+    let window = (flow.guest_window as usize).min(64 * 1024);
+    let limit = if window == 0 {
+        1
+    } else {
+        usize::from(flow.mss).clamp(1, 1460).min(window)
+    };
+    let end = limit.min(flow.inflight.len());
     let data = flow.inflight[..end].to_vec();
     let _ = send_tcp(outgoing, flow, flow.una, TCP_ACK | TCP_PSH, &data);
 }
@@ -864,6 +938,11 @@ fn send_tcp(outgoing: &OutQueues, flow: &TcpFlow, seq: u32, flags: u8, payload: 
     ) else {
         return false;
     };
+    if !payload.is_empty() && !NET_DATA_LOGGED.swap(true, Ordering::Relaxed) {
+        let n = frame.len().min(64);
+        eprintln!("relay-net: data frame={} head={:02x?}", frame.len(), &frame[..n]);
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
     outgoing.send_data(frame)
 }
 
@@ -962,6 +1041,7 @@ unsafe extern "C" {
         addrlen: u32,
     ) -> isize;
     fn read(fd: i32, buf: *mut u8, len: usize) -> isize;
+    fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize;
     fn write(fd: i32, buf: *const u8, len: usize) -> isize;
     fn close(fd: i32) -> i32;
     fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
@@ -999,6 +1079,10 @@ const EAGAIN: i32 = 35;
 const SOL_SOCKET: i32 = 0xffff;
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 const SO_ERROR: i32 = 0x1007;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const MSG_DONTWAIT: i32 = 0x40;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const MSG_DONTWAIT: i32 = 0x80;
 
 fn socket_error(fd: i32) -> i32 {
     let mut err: i32 = 0;
@@ -1104,7 +1188,11 @@ fn send_to(fd: i32, payload: &[u8], ip: [u8; 4], port: u16) -> bool {
 }
 
 fn read_fd<'a>(fd: i32, buf: &'a mut [u8]) -> Read<'a> {
-    let n = unsafe { read(fd, buf.as_mut_ptr(), buf.len()) };
+    // poll() said readable, then a blocking read of the leftover waited for
+    // the next CDN segment. That segment never comes until the guest ACKs,
+    // and the guest cannot ACK bytes this thread has not forwarded. recv
+    // with MSG_DONTWAIT returns EAGAIN so pump_to_guest still runs.
+    let n = unsafe { recv(fd, buf.as_mut_ptr(), buf.len(), MSG_DONTWAIT) };
     if n > 0 {
         Read::Bytes(&buf[..n as usize])
     } else if n == 0 {

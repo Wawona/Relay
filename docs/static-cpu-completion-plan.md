@@ -24,8 +24,8 @@ percentage. Whole-VM mathematical proof does not exist. Kani 0.68.0 plus Verus
 | Six-gap campaign | `relay_acceptance_gaps` items | **~85%** of those six, not of the product |
 | Formal coverage of the VM | Named helpers vs interpreter + devices + Linux | **low single digits** |
 
-Proof machine for the six-gap work: `E4A1C0DE` only. Guest `guest-4k-auth10`.
-Live log: `Wawona/.artifacts/relay-build/logs/guest-4k-auth17-smoke.log`.
+Proof machine for the six-gap work: `E4A1C0DE` only. Guest image `guest-4k-auth24`.
+Live log: `Wawona/.artifacts/relay-build/logs/guest-4k-auth39-smoke.log`.
 
 ### Twelve-gate table (iOS Mode A StaticCpu)
 
@@ -56,9 +56,9 @@ quote the six-gap campaign percent as product complete.
 | link-app | done | `wwn_waypipe_client_fd` on the iOS sim archive; iPadOS `WWNRelay.m` compiles |
 | multi-user | done | 4 KiB and 16 KiB Multi-User + `WAWONA_RELAY_READY=1` with journal forward |
 | disk-lifecycle | done | Marker, stop, grow 8 GiB, restart, marker back on `E4A1C0DE` |
-| nixpkgs-dns | partial | virtio-net NAT; `wawona-fastfetch: dns ok` (`channels.nixos.org` → 151.101.21.91). `nix run` dies TLS EOF on `api.github.com`. No `wawona-fastfetch: end` |
-| vsock-frame | done (4 KiB) | auth18 imported 800x600 SHM frame. READY=1. Keep Work Status until app shows it |
-| aot-measure | blocked on frame | 3-insn oracle match; two host threads; SharedRam after join; `nixos_translated=0`. No boot profile, no NixOS translate, no speed claim |
+| nixpkgs-dns | done | auth51 4 KiB and 16 KiB: `nix run nixpkgs#fastfetch` substitutes `fastfetch-2.67.1` from cache.nixos.org then `wawona-fastfetch: end`. Hello alone is not enough. |
+| vsock-frame | done (4 KiB) | auth18/auth51 imported 800x600 SHM frame. READY=1. App Mode A pumps importer into IlandPresentEngine (prove live session next) |
+| aot-measure | partial | 3-insn oracle + NixOS Image AOT (`aot_nixos_translate`): mid-block + linear VA seed; 20M fresh 100%; 50M/100M fresh 91.26%/95.63% (fixed early miss); 50M same-boot 100%. Translator off in store staticlib. Module/userspace text and speed claim still open |
 
 ### Shortest calendar path (required)
 
@@ -83,18 +83,16 @@ live 4 KiB auth17
 
 P0, this week, do in this order:
 
-1. **Imported SHM frame (only P0).** BUFFER_DIFF already arrives. Do not rebuild
-   NixOS, weston, or waypipe. Do not add GPU. Capture one live WMSG, write a
-   failing `shm_import` unit test, make `take_frame` log
-   `Relay imported SHM frame … sha256=`. Touch only importer + its Kani/Verus
-   helper so the formal restamp stays small. Kill and relaunch `static_smoke`
-   only after that stamp. Keep `ProjectStatusView` until that log line exists.
-2. **nix run print on the same guest.** DNS is done. Do not change `relay.nix`
-   flake URLs until host TLS is proved. If auth17 still hits `api.github.com`
-   EOF, the next smoke (the SHM binary) is the TLS retry. Exit:
-   `wawona-fastfetch: end` plus a real fastfetch print. Not a host DNS test.
-3. **16 KiB only after 4 KiB has a frame hash.** Same host importer. No second
-   protocol. No 16 KiB guest rebuild unless that boot dies on a new opcode.
+1. **Imported SHM frame.** Done on proof host (auth18/auth51 log line). Keep
+   formal helpers green when touching `shm_import`.
+2. **nix run nixpkgs#fastfetch.** Done auth51 (4 KiB and 16 KiB). Land deep
+   NAT queue + thin nixpkgs flake WIP; do not reopen hello-only realises.
+3. **iland present in app UI (active).** `relay_copy_frame` serves
+   `take_imported_frame`. Mode A StaticCpu starts `relay_start_shm_importer`
+   and pumps BGRA into `IlandPresentEngine`. `wwn_waypipe_client_fd` remains
+   a stub; host_waypipe is fallback only. Prove one live session surface.
+4. **16 KiB parity.** AUTH + frame + nix run already on auth51; keep same
+   importer binary for any new smoke.
 
 P1, only after P0 frame hash:
 

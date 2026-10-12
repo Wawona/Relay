@@ -210,17 +210,93 @@ impl SoftwareTlb {
 #[derive(Clone)]
 pub(crate) struct AotImage {
     hash: [u8; 32],
-    flat: Vec<u8>,
+    /// Contiguous signed regions keyed by guest VA of the first byte.
+    /// Sparse on purpose: a NixOS boot only translates hot kernel pages.
+    pub(crate) regions: BTreeMap<u64, Vec<u8>>,
     entry: u64,
-    blocks: BTreeMap<u64, Vec<u32>>,
+    pub(crate) blocks: BTreeMap<u64, Vec<u32>>,
+    /// Total signed text bytes across regions (for measurements).
+    pub signed_text_bytes: usize,
 }
 
 impl AotImage {
-    fn accepts_live(&self, live: &[u8]) -> bool {
+    /// True when every signed region currently matches live guest memory.
+    /// Prefer [`region_live_ok`] for sparse NixOS images: post-MMU pages are
+    /// not readable until the boot enables the translation that maps them.
+    fn accepts_live(&self, cpu: &StaticCpu) -> bool {
+        self.regions
+            .keys()
+            .all(|base| self.region_live_ok(cpu, *base))
+    }
+
+    /// Live check for the signed region that owns `pc` (or its page base).
+    fn region_live_ok(&self, cpu: &StaticCpu, pc: u64) -> bool {
+        let Some((base, expected)) = self.region_for(pc) else {
+            return false;
+        };
+        if expected.len() % 4 != 0 {
+            return false;
+        }
+        for (index, chunk) in expected.chunks_exact(4).enumerate() {
+            let addr = base.wrapping_add((index as u64) * 4);
+            let Ok(word) = cpu.peek_word(addr) else {
+                return false;
+            };
+            if !image_bytes_match(chunk, &word.to_le_bytes()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn region_for(&self, pc: u64) -> Option<(u64, &Vec<u8>)> {
+        if let Some(bytes) = self.regions.get(&pc) {
+            return Some((pc, bytes));
+        }
+        let page = pc & !(PAGE - 1);
+        if let Some(bytes) = self.regions.get(&page) {
+            let end = page.wrapping_add(bytes.len() as u64);
+            if pc >= page && pc < end {
+                return Some((page, bytes));
+            }
+        }
+        // Contiguous region may start mid-page in the 3-insn tests.
+        self.regions
+            .range(..=pc)
+            .next_back()
+            .and_then(|(base, bytes)| {
+                let end = base.wrapping_add(bytes.len() as u64);
+                if pc >= *base && pc < end {
+                    Some((*base, bytes))
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Block entry for `pc`, including mid-block targets (slice from offset).
+    fn block_at(&self, pc: u64) -> Option<&[u32]> {
+        if let Some(block) = self.blocks.get(&pc) {
+            return Some(block.as_slice());
+        }
+        self.blocks.range(..=pc).next_back().and_then(|(start, words)| {
+            let end = start.wrapping_add((words.len() as u64).wrapping_mul(4));
+            if pc < *start || pc >= end || (pc - start) % 4 != 0 {
+                return None;
+            }
+            let skip = ((pc - start) / 4) as usize;
+            Some(&words[skip..])
+        })
+    }
+
+    fn region_hash(regions: &BTreeMap<u64, Vec<u8>>) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(live);
-        let got: [u8; 32] = digest.finalize().into();
-        got == self.hash && image_bytes_match(&self.flat, live)
+        for (base, bytes) in regions {
+            digest.update(base.to_le_bytes());
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        }
+        digest.finalize().into()
     }
 }
 
@@ -235,37 +311,54 @@ pub(crate) struct AotStats {
 /// library feature, so a store build does not ship the translator.
 #[cfg(any(test, feature = "aot-translate"))]
 pub(crate) fn translate_image(entry: u64, code: &[u8]) -> Result<AotImage, RelayError> {
-    if code.len() % 4 != 0 || code.is_empty() {
-        return Err(RelayError::Failed(
-            "AOT image length must be a non-empty multiple of 4".into(),
-        ));
-    }
-    let mut words = Vec::with_capacity(code.len() / 4);
-    for chunk in code.chunks_exact(4) {
-        words.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+    let mut regions = BTreeMap::new();
+    regions.insert(entry, code.to_vec());
+    translate_regions(entry, regions)
+}
+
+/// Offline-translate sparse guest VA regions (hot NixOS kernel pages).
+#[cfg(any(test, feature = "aot-translate"))]
+pub(crate) fn translate_regions(
+    entry: u64,
+    regions: BTreeMap<u64, Vec<u8>>,
+) -> Result<AotImage, RelayError> {
+    if regions.is_empty() {
+        return Err(RelayError::Failed("AOT regions must be non-empty".into()));
     }
     let mut blocks = BTreeMap::new();
-    let mut index = 0;
-    while index < words.len() {
-        let pc = entry + (index as u64) * 4;
-        let mut block = Vec::new();
-        while index < words.len() {
-            let insn = words[index];
-            block.push(insn);
-            index += 1;
-            if is_control(insn) || block.len() == 16 {
-                break;
-            }
+    let mut signed_text_bytes = 0usize;
+    for (base, code) in &regions {
+        if code.len() % 4 != 0 || code.is_empty() {
+            return Err(RelayError::Failed(
+                "AOT region length must be a non-empty multiple of 4".into(),
+            ));
         }
-        blocks.insert(pc, block);
+        signed_text_bytes = signed_text_bytes.saturating_add(code.len());
+        let mut words = Vec::with_capacity(code.len() / 4);
+        for chunk in code.chunks_exact(4) {
+            words.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        let mut index = 0;
+        while index < words.len() {
+            let pc = base.wrapping_add((index as u64) * 4);
+            let mut block = Vec::new();
+            while index < words.len() {
+                let insn = words[index];
+                block.push(insn);
+                index += 1;
+                if is_control(insn) || block.len() == 16 {
+                    break;
+                }
+            }
+            blocks.insert(pc, block);
+        }
     }
-    let mut digest = Sha256::new();
-    digest.update(code);
     Ok(AotImage {
-        hash: digest.finalize().into(),
-        flat: code.to_vec(),
+        hash: AotImage::region_hash(&regions),
+        regions,
         entry,
         blocks,
+        signed_text_bytes,
     })
 }
 
@@ -299,21 +392,20 @@ pub(crate) fn run_image(
     let mut stats = AotStats::default();
     let mut tlb = SoftwareTlb::new();
     let mut dropped: BTreeSet<u64> = BTreeSet::new();
-    let live = live_bytes(cpu, image)?;
-    let signed_ok = image.accepts_live(&live);
     while stats.aot_insns + stats.fallback_insns < budget {
         let pc = cpu.pc;
         let page = pc & !(PAGE - 1);
-        if !aot_block_eligible(
-            signed_ok,
-            dropped.contains(&page),
-            image.blocks.contains_key(&pc),
-        ) {
+        let signed_ok = image.region_live_ok(cpu, pc);
+        let Some(block) = image.block_at(pc) else {
+            cpu.step()?;
+            stats.fallback_insns += 1;
+            continue;
+        };
+        if !aot_block_eligible(signed_ok, dropped.contains(&page), true) {
             cpu.step()?;
             stats.fallback_insns += 1;
             continue;
         }
-        let block = image.blocks.get(&pc).expect("checked");
         if !block_matches(cpu, pc, block) {
             cpu.step()?;
             stats.fallback_insns += 1;
@@ -352,16 +444,6 @@ fn remember_exec(tlb: &mut SoftwareTlb, va: u64) {
         let page = va & !(PAGE - 1);
         tlb.insert(va, page);
     }
-}
-
-fn live_bytes(cpu: &StaticCpu, image: &AotImage) -> Result<Vec<u8>, RelayError> {
-    let mut live = Vec::with_capacity(image.flat.len());
-    let mut pc = image.entry;
-    for _ in 0..image.flat.len() / 4 {
-        live.extend_from_slice(&cpu.peek_word(pc)?.to_le_bytes());
-        pc = pc.wrapping_add(4);
-    }
-    Ok(live)
 }
 
 fn changed_page(cpu: &StaticCpu, start: u64, words: &[u32]) -> Option<u64> {
@@ -563,10 +645,37 @@ mod tests {
         eprintln!(
             "AOT measure: translator_ms={} signed_text_bytes={} aot_insns={} fallback_insns={} nixos_translated=0",
             translator.as_millis(),
-            image.flat.len(),
+            image.signed_text_bytes,
             stats.aot_insns,
             stats.fallback_insns
         );
+    }
+
+    #[test]
+    fn sparse_hot_kernel_regions_translate_and_run() {
+        // Two non-adjacent "pages" of the same MOVZ/ADD/RET closure.
+        let words = [0xd280_0100u32, 0x9100_0400u32, 0xd65f_03c0u32];
+        let mut code_a = Vec::new();
+        let mut code_b = Vec::new();
+        for word in words {
+            code_a.extend_from_slice(&word.to_le_bytes());
+            code_b.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut regions = BTreeMap::new();
+        regions.insert(0x1000, code_a);
+        regions.insert(0x3000, code_b);
+        let image = translate_regions(0x1000, regions).unwrap();
+        assert_eq!(image.signed_text_bytes, 24);
+        assert_eq!(image.blocks.len(), 2);
+
+        let mut memory = GuestMemory::allocate(GuestPageSize::FOUR_KIB, 16 * 1024).unwrap();
+        memory.write(0x1000, &image.regions[&0x1000]).unwrap();
+        memory.write(0x3000, &image.regions[&0x3000]).unwrap();
+        let mut cpu = StaticCpu::new(memory, 0x1000).unwrap();
+        let stats = run_image(&mut cpu, &image, 3).unwrap();
+        assert_eq!(stats.fallback_insns, 0);
+        assert_eq!(stats.aot_insns, 3);
+        assert_eq!(cpu.x_value(0), 9);
     }
 }
 

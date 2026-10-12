@@ -33,3 +33,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 [[example]]
 name = "static_kernel_probe"
 required-features = ["kernel-probe"]
+
+[[example]]
+name = "aot_nixos_translate"
+required-features = ["aot-translate"]

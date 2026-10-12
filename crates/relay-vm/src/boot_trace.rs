@@ -20,7 +20,7 @@ impl BootTrace {
         let file = match File::create(path) {
             Ok(file) => file,
             Err(error) => {
-                eprintln!("Relay boot trace unavailable: {error}");
+                let _ = writeln!(std::io::stderr(), "Relay boot trace unavailable: {error}");
                 return None;
             }
         };

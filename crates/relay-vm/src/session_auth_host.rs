@@ -23,7 +23,9 @@ pub struct AuthenticatedReady {
 }
 
 pub struct AuthListener {
-    stop: Arc<AtomicBool>,
+    /// Private flag: Drop sets this so the listen thread exits without touching
+    /// StaticCpu's session `stop` (shared Arc from `serve_connection`).
+    thread_stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
     ready: Arc<Mutex<Option<AuthenticatedReady>>>,
 }
@@ -38,9 +40,13 @@ impl AuthListener {
     ) -> Self {
         let ready = Arc::new(Mutex::new(None));
         let ready_w = Arc::clone(&ready);
-        let stop_w = Arc::clone(&stop);
+        let session_stop = stop;
+        let thread_stop = Arc::new(AtomicBool::new(false));
+        let thread_stop_w = Arc::clone(&thread_stop);
         let join = thread::spawn(move || {
-            while !stop_w.load(Ordering::Acquire) {
+            while !session_stop.load(Ordering::Acquire)
+                && !thread_stop_w.load(Ordering::Acquire)
+            {
                 match connections.recv_timeout(Duration::from_millis(50)) {
                     Ok(connection) => {
                         if let Ok(outcome) = serve_one(connection.stream, &key, &challenge) {
@@ -56,7 +62,7 @@ impl AuthListener {
             }
         });
         Self {
-            stop,
+            thread_stop,
             join: Some(join),
             ready,
         }
@@ -81,15 +87,15 @@ impl AuthListener {
         listener
             .set_nonblocking(true)
             .map_err(|e| RelayError::Failed(format!("session auth nonblocking: {e}")))?;
-        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(Mutex::new(None));
-        let stop_w = Arc::clone(&stop);
+        let stop_w = Arc::clone(&thread_stop);
         let ready_w = Arc::clone(&ready);
         let join = thread::spawn(move || {
             run_listener(listener, key, challenge, stop_w, ready_w);
         });
         Ok(Self {
-            stop,
+            thread_stop,
             join: Some(join),
             ready,
         })
@@ -110,7 +116,7 @@ impl AuthListener {
 
 impl Drop for AuthListener {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.thread_stop.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }

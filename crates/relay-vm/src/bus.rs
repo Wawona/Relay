@@ -370,6 +370,10 @@ impl Bus {
         }
         false
     }
+    pub(crate) fn vsock_needs_poll(&self) -> bool {
+        self.vsock.needs_poll()
+    }
+
     pub(crate) fn service(
         &mut self,
         memory: &mut crate::guest::GuestMemory,
@@ -398,14 +402,17 @@ impl Bus {
             self.pending_irqs.remove(&68);
         }
         let net_completed = self.net.service(&mut self.net_transport, memory)?;
-        // Keep the net IRQ asserted while RX frames are staged but the guest
-        // has not posted buffers yet. Clearing it left auth27 with synack:1
-        // on the host and a curl connect timeout in the guest.
-        let net_rx_pending = self.net.rx_pending();
-        if net_completed != 0 || net_rx_pending || self.net_transport.read(0x060)? != 0 {
-            if net_rx_pending && net_completed == 0 {
-                let _ = self.net_transport.force_used_interrupt();
-            }
+        // Interrupt only when a used-ring entry was published or the guest
+        // has not acked that status yet. Raising IRQ 67 while frames are
+        // staged and the RX ring has no buffers livelocks the guest: SPI 67
+        // stays ahead of the timer, NAPI never refills, nobuf climbs without
+        // hrx moving (auth37, after the TLS ACKs).
+        // auth42: status!=0 alone was enough to keep 67 asserted during that
+        // starve, so github:NixOS/nixpkgs tarballs truncated mid-unpack.
+        let rx_starved = self.net.rx_pending() && net_completed == 0;
+        if net_completed != 0
+            || (!rx_starved && self.net_transport.read(0x060)? != 0)
+        {
             self.pending_irqs.insert(NET_IRQ);
         } else {
             self.pending_irqs.remove(&NET_IRQ);

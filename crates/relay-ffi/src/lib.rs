@@ -3,8 +3,9 @@
 use relay_core::{resolve_backend, RelayBackend, RelayKind, RelaySpec};
 use relay_oci::prepare_bundle;
 use relay_vm::{
-    console_log as vm_console_log, generations_json as vm_generations_json, start as vm_start,
-    status as vm_status, stop as vm_stop, RelayHandle, RelayVmStatus,
+    console_log as vm_console_log, generations_json as vm_generations_json,
+    start as vm_start, start_shm_importer as vm_start_shm_importer, status as vm_status,
+    stop as vm_stop, take_imported_frame as vm_take_imported_frame, RelayHandle, RelayVmStatus,
 };
 use std::collections::HashSet;
 use std::ffi::{CStr, CString};
@@ -310,7 +311,24 @@ pub unsafe extern "C" fn relay_copy_log(
 
 #[no_mangle]
 /// # Safety
+/// Handle must be a valid NUL-terminated string. Starts the vsock SHM importer
+/// (exclusive with `relay_start_host_waypipe` on the same session).
+pub unsafe extern "C" fn relay_start_shm_importer(handle: *const c_char) -> c_int {
+    let id = match cstr(handle) {
+        Ok(id) => id,
+        Err(error) => return error,
+    };
+    match vm_start_shm_importer(id) {
+        Ok(()) => OK,
+        Err(error) => map_err(error),
+    }
+}
+
+#[no_mangle]
+/// # Safety
 /// Pointer arguments must be valid for their declared capacities.
+/// Serves the latest waypipe SHM import (`take_imported_frame`), not the
+/// unused `RelayHandle.frame` placeholder.
 pub unsafe extern "C" fn relay_copy_frame(
     handle: *const c_char,
     rgba: *mut u8,
@@ -322,32 +340,33 @@ pub unsafe extern "C" fn relay_copy_frame(
         Ok(s) => s,
         Err(c) => return c,
     };
-    let g = match HANDLES.lock() {
-        Ok(g) => g,
-        Err(_) => return ERR_FAIL,
+    let frame = match vm_take_imported_frame(id) {
+        Ok(frame) => frame,
+        Err(error) => return map_err(error),
     };
-    let h = match g.iter().find(|h| h.id == id) {
-        Some(h) => h,
-        None => return ERR_ARG,
-    };
-    let (w, ht) = (h.frame_width, h.frame_height);
-    if !width_out.is_null() {
-        unsafe { *width_out = w };
-    }
-    if !height_out.is_null() {
-        unsafe { *height_out = ht };
-    }
-    let Some(frame) = h.frame.as_ref() else {
+    let Some(frame) = frame else {
+        if !width_out.is_null() {
+            unsafe { *width_out = 0 };
+        }
+        if !height_out.is_null() {
+            unsafe { *height_out = 0 };
+        }
         return ERR_PLANNED;
     };
+    if !width_out.is_null() {
+        unsafe { *width_out = frame.width };
+    }
+    if !height_out.is_null() {
+        unsafe { *height_out = frame.height };
+    }
     if rgba.is_null() {
         return OK;
     }
-    if len < frame.len() {
+    if len < frame.pixels.len() {
         return ERR_FAIL;
     }
     unsafe {
-        std::ptr::copy_nonoverlapping(frame.as_ptr(), rgba, frame.len());
+        std::ptr::copy_nonoverlapping(frame.pixels.as_ptr(), rgba, frame.pixels.len());
     }
     OK
 }

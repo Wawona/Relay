@@ -46,9 +46,14 @@ int relay_status(const char *handle, char **status_out);
 int relay_copy_log(const char *handle, uint8_t *bytes, size_t capacity,
                    size_t *length_out);
 
-/* Latest guest SHM frame. rgba may be NULL to query width/height only. */
+/* Latest guest SHM frame. rgba may be NULL to query width/height only.
+ * Prefer start_shm_importer first: copy_frame then serves take_imported_frame. */
 int relay_copy_frame(const char *handle, uint8_t *rgba, size_t len,
                      uint32_t *width, uint32_t *height);
+
+/* Mode A present path: import waypipe SHM on vsock 1024 into Relay.
+ * Mutually exclusive with relay_start_host_waypipe on the same handle. */
+int relay_start_shm_importer(const char *handle);
 
 /* Native Nix editor data. NULL source requests the default file. */
 int relay_nix_editor(const char *name, const char *source, char **json_out);

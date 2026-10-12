@@ -21,6 +21,37 @@ const CHUNK: usize = 4096;
 const RECEIVE_CLOSED: u32 = 1;
 const SEND_CLOSED: u32 = 2;
 
+pub(crate) fn vsock_debug_log(line: &str) {
+    use std::os::unix::fs::OpenOptionsExt;
+    // Never eprintln!: a broken simctl console-pty returns EIO and Rust's
+    // eprintln panics ("failed printing to stderr"), killing StaticCpu at
+    // the gt≈482 session dial. File append is the evidence path.
+    let _ = writeln!(std::io::stderr(), "{line}");
+    // TMPDIR first (iOS sim app-container), then XDG, then host /tmp.
+    let mut paths = Vec::new();
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        paths.push(std::path::PathBuf::from(tmp).join("relay-vsock.log"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
+        paths.push(std::path::PathBuf::from(xdg).join("relay-vsock.log"));
+    }
+    paths.push(std::path::PathBuf::from("/tmp/relay-vsock.log"));
+    for path in paths {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true).mode(0o666);
+        let file = match opts.open(&path) {
+            Ok(file) => Some(file),
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                opts.open(&path).ok()
+            }
+        };
+        if let Some(mut file) = file {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 type Key = (u32, u32); // Guest port, host port.
 
 /// A connected byte stream. Caller must authenticate the session separately.
@@ -144,10 +175,36 @@ impl Vsock {
     fn has_room(&self, bytes: usize) -> bool {
         self.outgoing.len() < MAX_PACKETS && bytes <= MAX_QUEUED - self.queued
     }
+    /// True when virtio-vsock needs frequent `bus.service` (active flows or
+    /// queued TX). Used by StaticCpu to tighten the service period during
+    /// guest session dial so REQUEST/ACCEPT cannot starve for 4K steps.
+    pub(crate) fn needs_poll(&self) -> bool {
+        !self.flows.is_empty() || self.queued > 0
+    }
+
     fn enqueue(&mut self, header: Header, data: &[u8]) -> Result<(), RelayError> {
         let size = wire::HEADER_BYTES + data.len();
-        if !self.has_room(size) {
-            return Err(RelayError::Failed("vsock outgoing budget exhausted".into()));
+        // Fail-soft under TX pressure. Returning Err here kills StaticCpu via
+        // run_slice and freezes Mode A session AUTH/SHM (gt≈482 wall). Drop
+        // oldest queued packets until this one fits; if a single packet can
+        // never fit, drop the send and keep the vCPU alive.
+        let mut dropped = 0usize;
+        while !self.has_room(size) {
+            if self.outgoing.is_empty() {
+                vsock_debug_log(&format!(
+                    "Relay vsock: drop enqueue (oversized) dst_port={} op={} len={}",
+                    header.dst_port, header.op, data.len()
+                ));
+                return Ok(());
+            }
+            self.pop();
+            dropped += 1;
+        }
+        if dropped != 0 {
+            vsock_debug_log(&format!(
+                "Relay vsock: drop oldest outgoing count={dropped} (budget pressure) dst_port={} op={}",
+                header.dst_port, header.op
+            ));
         }
         let packet = header.encode(data)?;
         self.queued += packet.len();
@@ -163,9 +220,14 @@ impl Vsock {
         }
     }
     fn discard_flow_packets(&mut self, key: Key) {
-        self.outgoing.retain(|packet| {
-            let (header, _) = Header::decode(packet).expect("host-created vsock packet");
-            (header.dst_port, header.src_port) != key
+        // Never panic on decode: a corrupt host queue must not kill StaticCpu
+        // (Mode A gt≈482 silent thread death, no Relay exit / death log).
+        self.outgoing.retain(|packet| match Header::decode(packet) {
+            Ok((header, _)) => (header.dst_port, header.src_port) != key,
+            Err(_) => {
+                vsock_debug_log("Relay vsock: drop undecodable outgoing during discard");
+                false
+            }
         });
         self.queued = self.outgoing.iter().map(Vec::len).sum();
     }
@@ -196,29 +258,72 @@ impl Vsock {
         let (header, data) = Header::decode(packet)?;
         #[cfg(feature = "kernel-probe")]
         if self.traced_packets < 128 {
-            eprintln!("Relay vsock guest header: {header:?}");
+            vsock_debug_log(&format!("Relay vsock guest header: {header:?}"));
             self.traced_packets += 1;
         }
         // Do not let a packet from another CID tear down an existing flow.
         if header.src_cid != GUEST_CID || header.dst_cid != HOST_CID {
+            if header.dst_port == 1024 || header.src_port == 1024 {
+                vsock_debug_log(&format!(
+                    "vsock DROP cid-mismatch src_cid={} dst_cid={} op={} dst_port={} src_port={} (want guest={} host={})",
+                    header.src_cid,
+                    header.dst_cid,
+                    header.op,
+                    header.dst_port,
+                    header.src_port,
+                    GUEST_CID,
+                    HOST_CID
+                ));
+            }
             return Ok(());
         }
         if header.kind != wire::STREAM
             || (header.op != wire::DATA && !data.is_empty())
             || (header.op != wire::SHUTDOWN && header.flags != 0)
         {
+            vsock_debug_log(&format!(
+                "vsock REJECT bad-header op={} kind={} flags={} len={} dst_port={} src_port={}",
+                header.op, header.kind, header.flags, header.len, header.dst_port, header.src_port
+            ));
             return self.reject(header);
         }
         let key = (header.src_port, header.dst_port);
         if header.op == wire::REQUEST {
+            vsock_debug_log(&format!(
+                "vsock REQUEST dst_port={} src_port={} fwd_cnt={} buf_alloc={} flows={} listeners={}",
+                header.dst_port,
+                header.src_port,
+                header.fwd_cnt,
+                header.buf_alloc,
+                self.flows.len(),
+                self.listeners.len()
+            ));
             if self.flows.contains_key(&key)
                 || self.flows.len() >= MAX_FLOWS
                 || header.fwd_cnt != 0
                 || header.src_port == 0
             {
+                let why = if header.src_port == 0 {
+                    "src_port0"
+                } else if header.fwd_cnt != 0 {
+                    "fwd_cnt"
+                } else if self.flows.len() >= MAX_FLOWS {
+                    "max_flows"
+                } else {
+                    "dup_flow"
+                };
+                vsock_debug_log(&format!(
+                    "vsock REJECT {why} dst_port={} src_port={} fwd_cnt={} flows={}",
+                    header.dst_port, header.src_port, header.fwd_cnt, self.flows.len()
+                ));
                 return self.reject(header);
             }
             let Some(listener) = self.listeners.get(&header.dst_port) else {
+                // No listen(1024) / importer not attached → guest ECONNRESET.
+                vsock_debug_log(&format!(
+                    "vsock REJECT no-listener dst_port={} src_port={}",
+                    header.dst_port, header.src_port
+                ));
                 return self.reject(header);
             };
             let (socket, stream) =
@@ -231,7 +336,16 @@ impl Vsock {
                 host_port: key.1,
                 stream,
             };
-            if listener.try_send(connection).is_err() {
+            if let Err(err) = listener.try_send(connection) {
+                // Full or Disconnected: importer not draining Receiver.
+                let why = match err {
+                    std::sync::mpsc::TrySendError::Full(_) => "full",
+                    std::sync::mpsc::TrySendError::Disconnected(_) => "disconnected",
+                };
+                vsock_debug_log(&format!(
+                    "vsock REJECT try_send={why} dst_port={} src_port={}",
+                    header.dst_port, header.src_port
+                ));
                 return self.reject(header);
             }
             let flow = Flow {
@@ -250,6 +364,10 @@ impl Vsock {
             };
             self.enqueue(flow.header(key, wire::RESPONSE, 0, 0), &[])?;
             self.flows.insert(key, flow);
+            vsock_debug_log(&format!(
+                "vsock ACCEPT dst_port={} src_port={} buf_alloc={}",
+                header.dst_port, header.src_port, header.buf_alloc
+            ));
             return Ok(());
         }
         let Some(flow) = self.flows.get_mut(&key) else {
@@ -290,7 +408,9 @@ impl Vsock {
             if !self.has_room(wire::HEADER_BYTES + CHUNK) {
                 break;
             }
-            let flow = self.flows.get_mut(&key).unwrap();
+            let Some(flow) = self.flows.get_mut(&key) else {
+                continue;
+            };
             let mut broken = false;
             if !flow.pending.is_empty() {
                 let (first, _) = flow.pending.as_slices();
@@ -342,7 +462,18 @@ impl Vsock {
                     flow.host_eof = true;
                 }
                 Ok(n) => {
-                    assert!(flow.peer.reserve(n as u32));
+                    if !flow.peer.reserve(n as u32) {
+                        // Credit raced or wrapped; reset flow instead of assert-panic.
+                        vsock_debug_log(&format!(
+                            "Relay vsock: credit reserve failed n={n} free={} (reset flow)",
+                            flow.peer.free()
+                        ));
+                        let header = flow.header(key, wire::RESET, 0, 0);
+                        self.flows.remove(&key);
+                        self.discard_flow_packets(key);
+                        self.enqueue(header, &[])?;
+                        continue;
+                    }
                     let header = flow.header(key, wire::DATA, n, 0);
                     self.enqueue(header, &buffer[..n])?;
                 }

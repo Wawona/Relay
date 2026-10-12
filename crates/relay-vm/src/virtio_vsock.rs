@@ -48,7 +48,9 @@ pub(crate) fn service(
                     })?;
             }
             let used = if queue == 0 {
-                let packet = device.front().unwrap();
+                let Some(packet) = device.front() else {
+                    break;
+                };
                 if capacity < packet.len() {
                     return Err(RelayError::Failed(
                         "virtio vsock receive buffer too small".into(),
@@ -80,6 +82,22 @@ pub(crate) fn service(
                     let n = descriptor.length as usize;
                     memory.read(descriptor.address, &mut packet[copied..copied + n])?;
                     copied += n;
+                }
+                // Prove virtio TX delivered a waypipe dial before Device::receive
+                // filtering. Empty relay-vsock.log + guest hang @ session start
+                // means either no TX here, or receive never saw REQUEST.
+                if let Ok((header, _)) = vsock_wire::Header::decode(&packet) {
+                    if header.dst_port == 1024 || header.src_port == 1024 {
+                        crate::vsock::vsock_debug_log(&format!(
+                            "virtio vsock TX op={} dst_port={} src_port={} src_cid={} dst_cid={} len={}",
+                            header.op,
+                            header.dst_port,
+                            header.src_port,
+                            header.src_cid,
+                            header.dst_cid,
+                            header.len
+                        ));
+                    }
                 }
                 device.receive(&packet)?;
                 0 // Device does not write into TX buffers.

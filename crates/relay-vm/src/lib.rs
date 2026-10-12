@@ -2,6 +2,14 @@
 
 mod aot;
 pub use aot::ram_span_ok;
+#[cfg(any(test, feature = "aot-translate"))]
+mod aot_nixos;
+#[cfg(feature = "aot-translate")]
+pub use aot_nixos::{
+    hot_kernel_regions_from_image, profile_nixos_boot, translate_nixos_boot,
+    translate_nixos_hot_kernel, NixosAotMeasure,
+    NixosBootProfile,
+};
 mod boot_trace;
 mod bus;
 mod cpu;
@@ -67,6 +75,7 @@ use relay_core::{
 use std::{
     collections::BTreeMap,
     fs,
+    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
@@ -89,6 +98,24 @@ pub const WAYPIPE_VSOCK_PORT: u32 = 1024;
 /// Virtiofs tag for OCI runtime bundles shared into the guest.
 #[cfg(target_os = "macos")]
 pub const OCI_SHARE_TAG: &str = "oci-bundle";
+
+/// Kernel cmdline token that arms the guest baked-slim OCI bind path.
+const STATICCPU_OCI_CMDLINE: &str = "wawona.oci=1";
+
+fn append_staticcpu_oci_cmdline(command_line: &mut String) {
+    if command_line
+        .split_whitespace()
+        .any(|token| token == STATICCPU_OCI_CMDLINE)
+    {
+        return;
+    }
+    if command_line.is_empty() {
+        *command_line = STATICCPU_OCI_CMDLINE.into();
+    } else {
+        command_line.push(' ');
+        command_line.push_str(STATICCPU_OCI_CMDLINE);
+    }
+}
 
 #[cfg(target_os = "macos")]
 static NEXT_VZ_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -269,14 +296,14 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
         .resources
         .as_ref()
         .ok_or_else(|| RelayError::Failed("Relay guest trust configuration is missing".into()))?;
-    manifest.verify_trust(
-        &resources.trusted_guest_keys,
-        resources.allow_unsigned_guest,
-    )?;
+        manifest.verify_trust(
+            &resources.trusted_guest_keys,
+            resources.allow_unsigned_guest,
+        )?;
     let mut manifest = resolved_manifest(manifest, resources.guest_directory.as_deref())?;
     manifest.memory_bytes = spec.vm_memory_bytes(manifest.memory_bytes)?;
     let (disk_gib, quota) = spec.vm_disk_limits()?;
-    guest::validate_artifacts(&manifest)?;
+        guest::validate_artifacts(&manifest)?;
     if spec.nixos_generation.is_some() && resources.state_directory.is_empty() {
         return Err(RelayError::Failed(
             "NixOS generation selection needs the machine disk".into(),
@@ -313,6 +340,13 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
             Some(directory.join("console.log")),
         )
     };
+    // StaticCpu has no virtiofs. Container kind sets wawona.oci=1 so the
+    // guest bind-mounts the baked slim runtime bundle at
+    // /run/wawona/oci-bundle (see nixos-guest relay.nix). VZ still shares
+    // host bundles over virtiofs; that path wins when config.json is there.
+    if spec.kind == RelayKind::Container {
+        append_staticcpu_oci_cmdline(&mut manifest.command_line);
+    }
     let (mut cpu, _) = linux_boot::create_cpu_with_disk(&manifest, Some(disk))?;
     let vsock_connections = cpu.listen_vsock(WAYPIPE_VSOCK_PORT)?;
     let auth_connections = cpu.listen_vsock(CONTROL_VSOCK_PORT)?;
@@ -422,7 +456,24 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
                 // 4K instructions keeps cancellation sub-millisecond on the
                 // static interpreter while avoiding a mutex round-trip every
                 // handful of guest instructions during Linux boot.
-                if let Err(error) = cpu.run_slice(4_096) {
+                // catch_unwind: vsock/virtio used to assert/expect on session
+                // dial and kill the vCPU with no Relay exit / death log
+                // (gt≈482 wall). Convert panic → RelayError so the path below
+                // always records evidence.
+                let slice = catch_unwind(AssertUnwindSafe(|| cpu.run_slice(4_096)));
+                let slice_err = match slice {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(payload) => {
+                        let detail = payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "non-string panic".into());
+                        Some(RelayError::Failed(format!("StaticCpu panic: {detail}")))
+                    }
+                };
+                if let Some(error) = slice_err {
                     if let Some(trace) = boot_trace.as_mut() {
                         trace.finish(
                             cpu.console(),
@@ -431,11 +482,21 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
                             &error.to_string(),
                         );
                     }
+                    // Always record outside the console mutex. UI
+                    // console_log clones can hold the lock during long boots;
+                    // without this the gt≈482 session death leaves no
+                    // `Relay StaticCpu:` line in relay-shm / relay-vsock logs.
+                    let death = format!(
+                        "Relay StaticCpu: {error}; pc={:#x}; insn={}",
+                        cpu.pc,
+                        thread_instructions.load(Ordering::Relaxed)
+                    );
+                    crate::shm_import::shm_debug_log(&death);
+                    crate::vsock::vsock_debug_log(&death);
                     if let Ok(mut output) = thread_console.lock() {
                         output.clear();
                         output.extend_from_slice(cpu.console());
-                        output
-                            .extend_from_slice(format!("\nRelay StaticCpu: {error}\n").as_bytes());
+                        output.extend_from_slice(format!("\n{death}\n").as_bytes());
                     }
                     thread_state.store(2, Ordering::Release);
                     return;
@@ -1183,12 +1244,31 @@ pub fn start_shm_importer(handle: &str) -> Result<(), RelayError> {
         .take()
         .ok_or_else(|| RelayError::Failed("Relay host waypipe is already attached".into()))?;
     let frame = Arc::clone(&session.imported_frame);
-    let importer = shm_import::Importer::start(
-        connections,
-        Arc::clone(&session.stop),
-        Arc::clone(&session.state),
-        frame,
-    )?;
+    let stop_flag = Arc::clone(&session.stop);
+    let state_flag = Arc::clone(&session.state);
+    shm_import::shm_debug_log(&format!(
+        "Relay SHM import: attach begin handle={handle} stop={} state={}",
+        stop_flag.load(Ordering::Acquire),
+        state_flag.load(Ordering::Acquire)
+    ));
+    // Release the registry lock before spawn+alive probe so StaticCpu can run.
+    drop(sessions);
+    let importer = shm_import::Importer::start(connections, stop_flag, state_flag, frame)?;
+    if !importer.is_alive() {
+        return Err(RelayError::Failed(
+            "SHM importer accept thread not alive after start".into(),
+        ));
+    }
+    shm_import::shm_debug_log(&format!(
+        "Relay SHM import: attach ok handle={handle}"
+    ));
+    let sessions = STATIC_SESSIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut sessions = sessions
+        .lock()
+        .map_err(|_| RelayError::Failed("Relay StaticCpu registry is poisoned".into()))?;
+    let session = sessions
+        .get_mut(handle)
+        .ok_or_else(|| RelayError::Failed("Relay StaticCpu session not found".into()))?;
     session.shm_importer = Some(importer);
     Ok(())
 }
@@ -1652,5 +1732,20 @@ mod tests {
         stop(&restarted.id).unwrap();
         assert!(stop(&handle.id).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn append_staticcpu_oci_cmdline_is_idempotent() {
+        let mut empty = String::new();
+        append_staticcpu_oci_cmdline(&mut empty);
+        assert_eq!(empty, "wawona.oci=1");
+        append_staticcpu_oci_cmdline(&mut empty);
+        assert_eq!(empty, "wawona.oci=1");
+
+        let mut existing = "console=hvc0".to_string();
+        append_staticcpu_oci_cmdline(&mut existing);
+        assert_eq!(existing, "console=hvc0 wawona.oci=1");
+        append_staticcpu_oci_cmdline(&mut existing);
+        assert_eq!(existing, "console=hvc0 wawona.oci=1");
     }
 }

@@ -8,12 +8,24 @@ staticlib. Translated blocks call `StaticCpu::execute_fetched`. A changed
 guest byte or a store into an executed page falls back to `StaticCpu::step`.
 
 A three-instruction block runs with zero fallback and matches the oracle.
-Two vCPUs run that path on two host threads. The bundled NixOS image is
-not translated. There is no speed measurement and no fastest or cleanest
-claim. Shared guest RAM across those threads is a mutex `SharedRam` with a proved
-span check. Each vCPU job still owns a private StaticCpu arena. Full SMP on
-one `GuestMemory` is unproved. Float, MMU, exceptions, and virtio are not
-reimplemented in the translator.
+Two vCPUs run that path on two host threads. Sparse hot-kernel AOT for the
+bundled NixOS Image is implemented behind `aot-translate`
+(`aot_nixos::translate_nixos_hot_kernel`, example `aot_nixos_translate`).
+Hot-kernel offline AOT for the bundled NixOS Image is implemented behind
+`aot-translate` (`aot_nixos`, example `aot_nixos_translate`). Mid-block entry,
+cold Image seeding, and linear post-MMU VA seeding cover the full bundled
+Image (~64 MiB file, dual-mapped to ~128 MiB signed VA regions). A fresh
+20M-instruction window measured 100% AOT coverage (4096 pages / 16 MiB). A
+fresh 50M window with the full Image measured 91.26% AOT; same-boot measure
+after that profile is 100% for the next 50M, so the fresh-boot gap is
+cross-boot path / non-Image text, not a hole in the signed Image. The
+translator still does not ship in the store staticlib. There is no speed
+claim and no fastest or cleanest claim. Shared guest RAM across those
+threads is a mutex `SharedRam` with a proved span check. Each vCPU job
+still owns a private StaticCpu arena. Full SMP on one `GuestMemory` is
+unproved. Float, MMU, exceptions, and virtio are not reimplemented in the
+translator. Module / userspace text and Multi-User on the AOT path remain
+open.
 
 ## Target
 
@@ -38,8 +50,11 @@ open boot and graphics gates. On 2026-10-03 a 4 KiB simulator boot ran
 `fsqrt d0, d0`. On 2026-10-05 a 4 KiB StaticCpu guest reached systemd
 and printed `WAWONA_RELAY_READY=1` (guest ~504s). Offline AOT of the
 three-instruction MOVZ/ADD/RET closure still matches StaticCpu with
-0 fallback instructions. The bundled NixOS image is not translated.
-There is no speed measurement and no fastest or cleanest claim.
+0 fallback instructions. Hot kernel pages from a real NixOS Image are offline-translated
+(`aot-translate`); 20M fresh = 100% AOT (16 MiB); 50M / 100M fresh full
+Image = 91.26% / 95.63% (fixed ~4.37M early fallback); 50M same-boot =
+100%. Module / userspace text, Multi-User on the AOT path, and a speed
+claim remain open.
 
 ## Engine
 

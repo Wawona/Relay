@@ -4,6 +4,7 @@ use relay_core::{
 };
 use std::{
     env, fs,
+    io::{self, Write},
     path::PathBuf,
     thread,
     time::{Duration, Instant},
@@ -79,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let handle = relay_vm::start(&spec)?;
     println!("Relay static guest started: {}", handle.id);
+    let _ = io::stdout().flush();
     if !vsock_probe {
         relay_vm::start_shm_importer(&handle.id)?;
     }
@@ -125,6 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let console = relay_vm::console_log(&handle.id)?;
             if console.len() > emitted_console {
                 eprint!("{}", String::from_utf8_lossy(&console[emitted_console..]));
+                let _ = io::stderr().flush();
                 emitted_console = console.len();
             }
             if console_failure(&console).is_some()
@@ -162,6 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "Relay static heartbeat: instructions={instructions} pc={pc:#x}/{physical_pc:#x} mmio={reads}/{writes} last={last_read:#x}/{last_write:#x} gicc={iar}/{spurious}/{eoir} irq={irq}/{eoi} iar67={iar67} console-rx={rx_notify}/{rx_complete} console-tx={tx_notify}/{tx_complete} nat=syn:{syn}/ok:{conn_ok}/fail:{conn_fail}/synack:{synack_ok}/drop:{synack_drop}/rst:{rst}/htx:{host_tx}/hrx:{host_rx} rx=del:{rx_del}/nobuf:{rx_nobuf}/small:{rx_small}"
             );
+            let _ = io::stderr().flush();
             next_progress_poll = Instant::now() + Duration::from_secs(30);
         }
         if authenticated.is_none() {
@@ -170,6 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Relay authenticated session: machine={} session={} unit={}",
                     ready.machine_id, ready.session_id, ready.unit_state
                 );
+                let _ = io::stderr().flush();
                 authenticated = Some(ready);
             }
         }
@@ -181,6 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     frame.height,
                     frame.sha256.iter().map(|b| format!("{b:02x}")).collect::<String>()
                 );
+                let _ = io::stderr().flush();
                 imported = Some(frame);
             }
         }
