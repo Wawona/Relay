@@ -415,8 +415,15 @@ fn import_stream(
             WMSG_BUFFER_DIFF if buf.len() >= 12 => {
                 let remote = i32::from_le_bytes(buf[0..4].try_into().unwrap());
                 if let Some(file) = files.get_mut(&remote) {
-                    apply_buffer_diff(file, &buf[4..])?;
-                    compositor.refresh_pool(file);
+                    // Soft-skip bad diffs: hard Err closed the vsock and Cage
+                    // died with "Failed to dispatch remote Wayland display"
+                    // before READY. Prefer keep stream + ACK.
+                    match apply_buffer_diff(file, &buf[4..]) {
+                        Ok(()) => compositor.refresh_pool(file),
+                        Err(error) => shm_debug_log(&format!(
+                            "Relay SHM import: BUFFER_DIFF remote={remote} skipped: {error}"
+                        )),
+                    }
                 }
             }
             WMSG_BUFFER_FILL if buf.len() >= 12 => {
@@ -463,10 +470,25 @@ fn apply_buffer_diff(file: &mut [u8], rest: &[u8]) -> Result<(), RelayError> {
     }
     let diff_size = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
     let ntrailing = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
-    let diff = rest.get(8..).unwrap_or(&[]);
-    if diff.len() < diff_size.saturating_add(ntrailing) {
-        return Err(RelayError::Failed("waypipe BUFFER_DIFF truncated".into()));
+    let wire = rest.get(8..).unwrap_or(&[]);
+    let need = diff_size.saturating_add(ntrailing);
+    // waypipe: diff_size/ntrailing are *uncompressed* sizes. Wire may be
+    // compressed (lz4/zstd). `--compress none` wire length equals `need`.
+    // Never hard-fail truncated: that RST'd vsock mid-Cage (N16 STARDUST).
+    if wire.len() < need {
+        // Compressed (lz4/zstd) or short: do not parse wire as damage
+        // intervals (garbage span → hard Err → vsock RST). Soft-skip;
+        // ACK still sent by caller. Decompress lands later.
+        shm_debug_log(&format!(
+            "Relay SHM import: BUFFER_DIFF soft-skip wire={} need={} diff_size={} ntrailing={} (expect compress none or add lz4)",
+            wire.len(),
+            need,
+            diff_size,
+            ntrailing
+        ));
+        return Ok(());
     }
+    let diff = &wire[..need];
     let body = &diff[..diff_size];
     let mut pos = 0;
     while pos + 8 <= body.len() {

@@ -5,12 +5,13 @@ Authority for evidence %: `static-cpu-completion-plan.md` scorecard.
 Skills: `graphify` (code KG), `graph-engineering` (task DAG + verifier split).
 Progress log: append-only section at bottom. One node per session when heavy.
 
-Completely complete stays **0%** until Distribution (store IPA on device) is green.
-Twelve-gate judgment ~**75%** (N10b **done** on this tip boot: `READY=1` +
-`AUTH_OK=1` + SHM `5b6add91…` + **`Mode A SHM present 800x600`**).
-N16 ASC: build **1791785768** `VALID` + `IN_BETA_TESTING`. STARDUST still
-needs unlock + TestFlight install for device READY. AAB rebuild after
-`terminalSrc` fix. N14 oci-live **GREEN** (fix6).
+Completely complete stays **0%** until store IPA/TF Distribution on device
+is green (Development tip is lab evidence only). Twelve-gate judgment
+~**80%**: N16 Development tip on STARDUST now has `READY=1` + SHM frame
+`800x600` `5b6add91…` after BUFFER_DIFF soft-skip (vsock no longer RST).
+`AUTH_OK` / `TRANSPORT_STARTED` not seen this boot; host present of that
+frame still open. N16 ASC: **1791785768** `VALID` + `IN_BETA_TESTING`.
+AAB **GREEN**. N14 oci-live **GREEN**.
 
 ## Stop rule
 
@@ -33,7 +34,7 @@ STARDUST signing / ASC upload.
 | Interaction | N11 touch-stop | **done** (Multi-Touch + park; eio AUTH kept) |
 | Page-size parity | N12 parity-16k | AUTH+frame+fastfetch **done** auth51 |
 | OCI lifecycle | N13 oci-host, N14 oci-live | host tests **done**; N14 live **done** (fix6 READY) |
-| Distribution | N15 ipa-audit, N16 stardust-asc | N15 **GREEN**; N16 ASC **VALID**/TF internal; device install **open** (STARDUST locked) |
+| Distribution | N15 ipa-audit, N16 stardust-asc | N15 **GREEN**; N16 ASC **VALID**/TF; STARDUST Dev tip **READY+SHM frame**; store TF path still open |
 
 ## Dependency graph
 
@@ -115,6 +116,35 @@ N10 mode-a-present (live)
 - Do not regress Relay Wasm Runtime
 
 ## Progress log
+
+### 2026-10-12 (BUFFER_DIFF soft-skip → READY + SHM frame)
+
+- `apply_buffer_diff`: `diff_size`/`ntrailing` are uncompressed. Wire shorter
+  → soft-skip + ACK (hard Err RST'd vsock; Cage "Failed to dispatch").
+  Match path still applies when wire len equals need (`--compress none`).
+- STARDUST Development tip + staged **16k**: `shm rc=0`,
+  `WAWONA_RELAY_READY=1`, `OPEN_FILE` 15MB, `Relay imported SHM frame:
+  800x600 sha256=5b6add91…`. Stream stays up through many BUFFER_DIFF.
+- HDR/Y-flip already in Wawona tree (negotiate `wp_color_manager_v1`;
+  `apple_metal_present_y_flip`). Completely complete still **0%** (store TF
+  Distribution). Next: AUTH/TRANSPORT markers + host present of SHM frame;
+  lz4 decompress if a guest ships compressed DIFF.
+
+### 2026-10-12 (HDR/Y-flip + N16 tip on STARDUST)
+
+- HDR: Settings/UI **Color Operations / HDR** (negotiate). Compositor
+  advertises `wp_color_manager_v1` TF (PQ/HLG); Metal EDR only on HDR buffers
+  when ColorOperations allows. No force-EDR from Settings.
+- Y-flip: `apple_metal_present_y_flip` = remap for Wayland top-down except
+  nested weston. Present shader `bottomUp` UV.
+- Root cause of `relay_start_shm_importer rc=-2`: flake pin `717a765` lacked
+  FFI; weak stub returned `ERR_PLANNED`. Fix: lock `wwn-relay` → `4ded84b`,
+  `-Wl,-u,_relay_start_shm_importer` in `xcodegen.nix`, tip archive rebuilt.
+- Evidence (Development tip + staged **16k** guest): `attach ok`,
+  `relay_start_shm_importer rc=0`, `AUTO_START: started`. Guest UART live:
+  Linux boot, Stage 1/2, systemd Multi-User queued, network/nsncd. OCI
+  virtio-fs mount fail expected. Completely complete still **0%** until
+  READY + AUTH + SHM frame.
 
 ### 2026-10-11 (N16: ASC VALID 1791785768; Watch size; AAB fix)
 
