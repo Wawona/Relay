@@ -8,8 +8,9 @@ Progress log: append-only section at bottom. One node per session when heavy.
 Completely complete stays **0%** until Distribution (store IPA on device) is green.
 Twelve-gate judgment ~**75%** (N10b **done** on this tip boot: `READY=1` +
 `AUTH_OK=1` + SHM `5b6add91…` + **`Mode A SHM present 800x600`**).
-Next: N16 STARDUST/ASC store IPA (N15 ios-sim + static ANGLE/SS **GREEN**).
-N14 oci-live **GREEN** (fix6). Do not revive Sept "boot EL1 from scratch".
+N16 ASC: build **1791785768** `VALID` + `IN_BETA_TESTING`. STARDUST still
+needs unlock + TestFlight install for device READY. AAB rebuild after
+`terminalSrc` fix. N14 oci-live **GREEN** (fix6).
 
 ## Stop rule
 
@@ -32,7 +33,7 @@ STARDUST signing / ASC upload.
 | Interaction | N11 touch-stop | **done** (Multi-Touch + park; eio AUTH kept) |
 | Page-size parity | N12 parity-16k | AUTH+frame+fastfetch **done** auth51 |
 | OCI lifecycle | N13 oci-host, N14 oci-live | host tests **done**; N14 live **done** (fix6 READY) |
-| Distribution | N15 ipa-audit, N16 stardust-asc | N15 ios-sim gate **GREEN**; N16 **open** |
+| Distribution | N15 ipa-audit, N16 stardust-asc | N15 **GREEN**; N16 ASC **VALID**/TF internal; device install **open** (STARDUST locked) |
 
 ## Dependency graph
 
@@ -114,6 +115,34 @@ N10 mode-a-present (live)
 - Do not regress Relay Wasm Runtime
 
 ## Progress log
+
+### 2026-10-11 (N16: ASC VALID 1791785768; Watch size; AAB fix)
+
+- ITMS-90475: ship `LaunchScreen.storyboard` + `UILaunchStoryboardName`
+  (`8f88e60`). Min OS 13 floor.
+- ITMS-90389: Watch was 90MB (Adwaita Xcursor ~40MB). Skip cursors + slim
+  fonts on watchOS (`ada5517`). Watch companion now **43MB**. Re-upload
+  build **1791785768** → ASC `processingState=VALID`,
+  `internalBuildState=IN_BETA_TESTING`.
+- STARDUST connected but **locked**; cannot open TestFlight / install from
+  agent until unlocked. Installed app still build `1` (not TF build).
+- AAB: `wawona-android-aab` missed `terminalSrc` → unresolved
+  `WawonaTerminalText`. Fixed `24bb7d3`; rebuild in flight.
+- Add Machine PID halt: fullScreenCover path still the fix (`bacb902`+).
+- Completely complete still **0%** until STARDUST runs TF build + READY.
+
+### 2026-10-11 (N16: store IPA staged; TF upload next)
+
+- Add Machine: `bacb902` / `ab218b0` / `27d65cf` (backport `fullScreenCover(item:)`
+  for iOS 13). Sim ~1s. Hitches unsupported on Simulator.
+- `github_ipa` GREEN: `dist/Wawona-26.10.11-iOS-arm64.ipa` (112M). Needs
+  `MATCH_READONLY=1`, unset `WAWONA_SKIP_NIX_PREBUILD`, detached session,
+  `WAWONA_GYM_OUTPUT` outside nix-shell tmp.
+- Mode A audit: Mode B dylib absent; `get-task-allow=false`; no undefined
+  HV/MAP_JIT; Watch companion + SwiftSupport present; only sanctioned
+  `libswift_Concurrency.dylib` loose. Direct `devicectl install` fails
+  (Beta profile / ASC path). N16 needs TestFlight + STARDUST from TF.
+- Completely complete still 0% until TF processing + device READY evidence.
 
 ### 2026-10-11 (N16: nix IPA eval RED; Fastlane path)
 
