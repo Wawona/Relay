@@ -126,10 +126,10 @@ N10 mode-a-present (live)
   `internalBuildState=IN_BETA_TESTING`.
 - STARDUST connected but **locked**; cannot open TestFlight / install from
   agent until unlocked. Installed app still build `1` (not TF build).
-- AAB: `wawona-android-aab` missed `terminalSrc` → unresolved
-  `WawonaTerminalText`. Fixed `24bb7d3`; rebuild in flight.
+- AAB: `terminalSrc` fix `24bb7d3`; Play internal upload **GREEN**
+  (`Wawona-26.10.11-Android-arm64-1791787807.aab`, versionCode 1791787807).
 - Add Machine PID halt: fullScreenCover path still the fix (`bacb902`+).
-- Completely complete still **0%** until STARDUST runs TF build + READY.
+- Completely complete still **0%** until STARDUST unlocked + TF install + READY.
 
 ### 2026-10-11 (N16: store IPA staged; TF upload next)
 
