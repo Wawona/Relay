@@ -7,9 +7,11 @@ Progress log: append-only section at bottom. One node per session when heavy.
 
 Completely complete stays **0%** until store IPA/TF Distribution on device
 is green (Development tip is lab evidence only). Twelve-gate judgment
-~**85%**: sim tip PID 94696 (2026-10-14) has `READY=1` + `AUTH_OK=1` +
-multi-hash SHM (45+ frames / 8 sha256) + Metal present of 800x600 band
-(opaque blit + overwrite). Coherent guest UI and store TF still open.
+~**88%**: sim tip PID 94696 (2026-10-14) has `READY=1` + `AUTH_OK=1` +
+multi-hash SHM (60 frames / 8 sha256) + Metal opaque present + N11 park
+(shake inject → Machines AX; guest AUTH held). Guest session is
+`weston-presentation-shm` (band looks like noise by design). Cage+foot
+still open for recognizable UI. Store TF still open.
 N16 ASC: **1791785768** `VALID` + `IN_BETA_TESTING`. AAB **GREEN**.
 N14 oci-live **GREEN**.
 
@@ -116,6 +118,18 @@ N10 mode-a-present (live)
 - Do not regress Relay Wasm Runtime
 
 ## Progress log
+
+### 2026-10-14 ~10:51 PDT — graph tick 25; N11 park + SHM stall note
+
+- Tip PID **94696**. N11: LLDB post `WWNDeviceDidShakeNotification` →
+  Machines AX (Start/Edit/Delete). AUTH/READY still in console; SHM
+  **60**/8 uniq held. After park, import log is PROTOCOL-only (no new
+  BUFFER_DIFF while surface hidden). Vsock TX still alive.
+- Metal present root cause already fixed (`90516ecc` opaque blit). Band
+  on screen = guest `weston-presentation-shm` pixels letterboxed, not
+  dead Metal. Next: Focus/Start remount surface; optional sessionCommand
+  → `weston-simple-shm` or Cage+foot for recognizable UI; N16 store TF.
+- Completely complete still **0%**.
 
 ### 2026-10-14 ~10:44 PDT — graph tick 24
 
