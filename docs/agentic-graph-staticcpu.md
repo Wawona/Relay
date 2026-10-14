@@ -119,6 +119,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:24 PDT — graph tick 31 (loop #28)
+
+- Tip PID **33722** ~10m. Guest **NixOS Stage 2** reached (~elapsed_ms 545s).
+  READY/AUTH/SHM still 0. Await Multi-User → session → simple-shm frames.
+- N15 PARTIAL_OK; N10 WIRING_OK (formal stamp stale; verify-formal still
+  running Kani/CBMC). Completely complete **0%**.
+
 ### 2026-10-14 ~11:16 PDT — graph tick 30 (loop #27)
 
 - Guest-4k `simple-shm` nix build **EXIT 0** (~13m). Embed+wipe done earlier.
