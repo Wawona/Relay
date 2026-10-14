@@ -119,6 +119,12 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:32 PDT — graph tick 33; Grow Root started
+
+- Tip PID **33722** ~16m. First-boot systemd: remount root OK, **Grow Root
+  File System** started (@gt ~214). READY/AUTH/SHM still 0. Poll continues.
+- Completely complete **0%**.
+
 ### 2026-10-14 ~11:26 PDT — graph tick 32; formal stamp OK
 
 - `scripts/verify-formal.sh` **EXIT 0** (~7.4m). N10 **WIRING_OK** +
