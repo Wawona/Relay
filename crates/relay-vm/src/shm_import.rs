@@ -285,10 +285,10 @@ const CONN_FIXED_BIT: u32 = 1 << 7;
 const CONN_UNSET_BIT: u32 = 1 << 31;
 
 fn publish_frame(sink: &Mutex<Option<ImportedFrame>>, frame: ImportedFrame) {
-    let already = sink.lock().ok().and_then(|g| g.is_some().then_some(()));
-    if already.is_some() {
-        return;
-    }
+    // Always keep latest. `take_imported_frame` only clones (peek); refusing
+    // overwrite left Mode A present stuck on the first noise buffer forever
+    // (N10b tip: one `Mode A SHM present` + identical sha256 while vsock
+    // kept delivering BUFFER_DIFF).
     shm_debug_log(&format!(
         "Relay imported SHM frame: {}x{} sha256={}",
         frame.width,
@@ -697,9 +697,10 @@ impl MiniCompositor {
             let n = file.len().min(pool.bytes.len());
             pool.bytes[..n].copy_from_slice(&file[..n]);
         }
-        if self.committed.is_none() {
-            let _ = self.import_guest_pixels();
-        }
+        // Re-import on every pool update so BUFFER_DIFF after the first
+        // commit still refreshes pixels (old path skipped while committed
+        // was Some, then take_frame cleared it too late for that diff).
+        let _ = self.import_guest_pixels();
     }
 
     fn dispatch(&mut self, object: u32, opcode: u16, args: &[u8]) -> Result<(), RelayError> {
@@ -1199,5 +1200,42 @@ mod tests {
         assert_eq!(frame.height, 64);
         assert_eq!(&frame.pixels[..4], &[0x11, 0x22, 0x33, 0xff]);
         assert_eq!(frame.sha256, frame_hash(&frame.pixels).unwrap());
+    }
+
+    #[test]
+    fn publish_frame_overwrites_unread_sink() {
+        let sink = Mutex::new(None);
+        let first = ImportedFrame {
+            width: 2,
+            height: 2,
+            pixels: vec![1; 16],
+            sha256: [1; 32],
+        };
+        let second = ImportedFrame {
+            width: 2,
+            height: 2,
+            pixels: vec![2; 16],
+            sha256: [2; 32],
+        };
+        publish_frame(&sink, first);
+        publish_frame(&sink, second);
+        let got = sink.lock().unwrap().take().expect("latest frame");
+        assert_eq!(got.pixels[0], 2);
+        assert_eq!(got.sha256[0], 2);
+    }
+
+    #[test]
+    fn refresh_pool_updates_committed_pixels() {
+        let width = 64u32;
+        let height = 64u32;
+        let mut file = vec![0u8; (width * height * 4) as usize];
+        file[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0xff]);
+        let mut compositor = MiniCompositor::new();
+        compositor.refresh_pool(&file);
+        assert!(compositor.committed.is_some());
+        file[0..4].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xff]);
+        compositor.refresh_pool(&file);
+        let frame = compositor.take_frame().expect("refreshed pixels");
+        assert_eq!(&frame.pixels[..4], &[0xaa, 0xbb, 0xcc, 0xff]);
     }
 }

@@ -117,6 +117,73 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~09:33 PDT — tip relaunched with guest + overwrite binary
+
+- First framefix install missed Embed guests → AUTO_START "requires a guest
+  manifest". Copied `wawona-nixos-guest-4k` from present-fix tip; reinstall.
+- Fresh `static-smoke-n10b` machine dir up; PID ~100% CPU hashing/boot.
+  Watcher: AUTH + ≥2 unique SHM sha → screenshot.
+- Completely complete still **0%**.
+
+### 2026-10-14 ~09:25 PDT — frame-overwrite tip installed (await guest)
+
+- Root cause fix unit-tested + tip binary **BUILD SUCCEEDED** (no-watch,
+  `WAWONA_SKIP_NIX_PREBUILD` + staged cargo `libwawona_relay.a` + term stub).
+  CalVer bumped **26.10.14**. Old tip: 3 imports / **1** unique sha; noise band.
+- New PID **71816** AUTO_START `static-smoke-n10b`; guest boot in flight.
+  Watcher arms for AUTH + ≥2 unique SHM hashes then screenshot.
+- Completely complete still **0%**.
+
+### 2026-10-14 ~01:40 PDT — Mode A first-light + AUTH; present stuck on first frame
+
+- Live tip PID **40944**: ASL `[WWNRelay] Mode A SHM present 800x600` @22:55;
+  screenshot noise band (not coherent guest UI). Guest console
+  `WAWONA_RELAY_AUTH_OK=1` / `WWN1 OK` @gt~552; Multi-User + User Manager up.
+  vsock TX port **1024** live; `relay-shm.log` many BUFFER_DIFF after one
+  imported sha256 `5b6add91…`. Completely complete still **0%**.
+- Root cause: `publish_frame` refused overwrite while `take_imported_frame`
+  only **clones** (never clears). Host kept presenting first noise buffer;
+  later diffs never published. Also `refresh_pool` skipped re-import while
+  `committed` was Some.
+- Fix (unit-tested): always overwrite sink; always re-import on pool refresh.
+  `cargo test -p relay-vm --lib shm_import` **8 ok**. Nix
+  `.#wawona-relay-ios-sim` rebuild in flight for tip hot-swap.
+- Scene log path on sim is app `/tmp` (not host `/tmp/wwn-modeb-scene.log`).
+  Trust ASL + app-container `relay-shm.log`.
+
+### 2026-10-13 (loop tick: AUTO_START_MACHINE)
+
+- Formal stamp **OK** (`13136156…`); N10 WIRING_OK + FORMAL_STAMP_OK.
+- Sim launch bug: `--setenv` after bundle became argv. Fix:
+  `SIMCTL_CHILD_WWN_AUTO_START_MACHINE=static-smoke-n10b`.
+- Live: `relay_start begin kind=vm backend=static-cpu` (hashing). Waiting
+  shm_importer + `relay present Mode A SHM`.
+
+### 2026-10-13 (explore follow-up: honest board + Kill)
+
+- [Explore StaticCpu gaps](5e5619b4-62b0-45c6-8a71-b384a9e8c113): Work Status
+  was over-green. Board now Active for present / Interaction / OCI / STARDUST.
+- `ContainerCommand::Kill` + `thin_lifecycle_commands_round_trip` green.
+- `WWNContainerRunner` → `WWNRelay` (same StaticCpu). Stop hides session.
+- Guest `wawona-container` postStop: `crun kill … KILL` then delete.
+- Plan todos interaction/oci-thin/stardust-dist reopened until live proof.
+
+### 2026-10-13 (plan loop: shm-ui board + gates)
+
+- Task graph wave: clear Work Status placeholder; first Mode A frame posts
+  `WWNShowSessionSurfaceNotification` (session surface owns pixels).
+- `ProjectStatusView`: iland present / Interaction / OCI / Offline AOT → Ready;
+  STARDUST/ASC stays Active (store TF Distribution). Completely complete 0%.
+- Gates (no `rg` on PATH): `verify-n10-mode-a-present.sh` WIRING_OK +
+  FORMAL_STAMP_STALE; `verify-n15-mode-a-firewall.sh` PARTIAL_OK;
+  `verify-aot-offline.sh` AOT_OK (9 aot tests; default features empty);
+  `cargo test -p relay-oci --lib` 13/13.
+- N15 tip Debug app: no Hypervisor.framework / `hv_vm_create`. Sim graphics
+  script flags MoltenVK string on Debug (not store IPA). ASC **1791785768**
+  already VALID/IN_BETA_TESTING. Plan stardust-dist automatable slice done;
+  store TF Distribution remains human gate (`n16-store-tf`).
+- Loop armed 10m (`AGENT_LOOP_TICK_staticcpu`). Formal refresh running.
+
 ### 2026-10-12 (BUFFER_DIFF soft-skip → READY + SHM frame)
 
 - `apply_buffer_diff`: `diff_size`/`ntrailing` are uncompressed. Wire shorter
@@ -1165,6 +1232,94 @@ N10 mode-a-present (live)
   remain); vsock TX **0**; no AUTH / No wl_shm yet. `stop=0` (not
   stopAll). Alive-probe fixed importer-missing; session-time StaticCpu
   stall remains. Completely complete still **0%**.
+
+### 2026-10-13 22:53 PDT — 10m graph tick (StaticCpu still spinning)
+
+- Tip PID **40944** etime ~1h18, **~98% CPU**, RSS ~189MB. Scene log frozen
+  since 21:36 (`shm_importer rc=0` + present enter only). No AUTH/READY/Mode A
+  SHM yet; no `no IlandPresenter` (armed path holds). Formal log still empty.
+- N16 store TF human-gated. Completely complete still **0%**.
+
+### 2026-10-13 21:39 PDT — 10m graph tick (shm-ui wait)
+
+- Formal log `/tmp/relay-verify-formal.log` empty (no FORMAL_OK this tick).
+- Tip PID **40944** still LIVE: `shm_importer rc=0`, no `Mode A SHM` frame
+  yet, no `no IlandPresenter`. Guest mid-boot. N16 store TF still human-gated.
+- Completely complete still **0%**.
+
+### 2026-10-13 21:36 PDT — IlandPresenter armed without lldb
+
+- Tip `/tmp/Wawona-n10b-present-fix` (ensureIlandPresenter + Ensure notify;
+  watch embed stripped for link; term stub). Hot-swap into sim after reboot.
+- AUTO_START `static-smoke-n10b` PID **40944**: `WWNShowSessionSurface`
+  mounted=1; ASL `CompositorHost: IlandPresenter armed reason=layoutSubviews
+  layer=1206x2334` (init 0x0 then layout re-arm). `shm_importer rc=0`.
+- No `no IlandPresenter` yet this boot. Waiting guest SHM → Mode A present.
+- Completely complete still **0%**.
+
+### 2026-10-13 20:16 PDT — Host alive, presenter nil (ensureIlandPresenter)
+
+- lldb on tip PID 21661: `CompositorHostPlatformView` **in** hierarchy with
+  `CAMetalLayer` (402x778), but `containerView` weak **nil** and
+  `activePresenterForDrain` **nil**. AUTH+READY+SHM already imported.
+- Root: sibling Host deinit cleared global presenter; RelayRunner nil-miss
+  re-posted `WWNShowSessionSurface` → SwiftUI remount churn.
+- Fix (building `/tmp/Wawona-n10b-present-fix`): `ensureIlandPresenter` on
+  init/layout/update + `WWNEnsureIlandPresenterNotification`; stop Show
+  remount on present-nil; deinit invalidate only if still owner.
+- Completely complete still **0%**.
+
+### 2026-10-13 19:51 PDT — tip remount fix LIVE (no nil presenter yet)
+
+- Installed `/tmp/Wawona-n10b-present-fix` tip (Guest Console skip for VM
+  AUTO_START; overlay-only; visible⇒mount; CompositorBridge Metal Host).
+- `WWNShowSessionSurface: mounted=1 visible=1` before `relay_start`.
+- Copied `wawona-nixos-guest-4k` into installed `.app` (present-fix build
+  missed embed). `relay_start done rc=0`, `shm_importer rc=0`, present enter.
+- **No** `no IlandPresenter` on this boot so far. Guest Stage 1 (~137s).
+- Prior boot: AUTH+READY+SHM proven; present only via lldb inject.
+- Completely complete still **0%**.
+
+### 2026-10-13 19:42 PDT — mount bug: Guest Console cover + empty ZStack
+
+- Root cause of nil `IlandPresenter` after AUTH/SHM: AUTO_START opened
+  Guest Console (fullScreenCover path) and/or `visible=1`+`mounted=0`
+  empty Machines ZStack. Tip binary Oct 12. Lab lldb inject proved
+  `relay present Mode A SHM 800x600` (garbage band layout).
+- Source fix (not in live tip yet): SceneDelegate skip Guest Console for
+  VM/container AUTO_START; GuestConsoleHostModifier overlay-only (no
+  fullScreenCover); machinesPane mount when visible|mounted;
+  CompositorBridge prefer Metal Host over SWIFT_PACKAGE placeholder.
+- Rebuild: `/tmp/Wawona-n10b-present-fix` xcodebuild Wawona-iOS.
+- Completely complete still **0%**.
+
+### 2026-10-13 19:37 PDT — READY+AUTH+SHM present (lldb presenter inject)
+
+- Guest: `WAWONA_RELAY_READY=1` @gt 540, Wayland session, autologin,
+  `WWN1 OK` + `WAWONA_RELAY_AUTH_OK=1` @gt 624. SHM import
+  `800x600 sha256=5b6add91…` (relay-shm.log). Vsock TX live.
+- Host tip (Oct 12 binary): `sessionSurfaceVisible=1` but
+  `WWNCompositorBridge.containerView` + `activePresenterForDrain` stayed
+  **nil** (SwiftUI never called `CompositorHost` makeUIView). Present
+  logged `no IlandPresenter` fails=100.
+- Lab: lldb inject `WWNIlandPresenter` on keyWindow CAMetalLayer →
+  scene log **`relay present Mode A SHM 800x600`**. Screenshot shows
+  garbage band (stride/layout vs full-screen layer), not clean guest UI.
+- Product fix still open: mount `CompositorHostView` when Mode A SHM
+  arrives without lldb. Then Multi-Touch + Stop (N11).
+- Completely complete still **0%**.
+
+### 2026-10-13 19:11 PDT — tip AUTO_START Stage 2 / systemd (sim)
+
+- Tip `/tmp/Wawona-n10b-dd` on iPhone 17 Pro UDID `9D70E2B7…`, data
+  `A5FEAA6F…`, machine `static-smoke-n10b`.
+- Host: `relay_start done`, `shm_importer rc=0`, present enter; SHM vsock
+  1024 attached. Wall ~282s / ~4.0B insn.
+- Guest: Stage 1 → rootfs mount vda (LVM warn expected) → **Stage 2** →
+  systemd 261.2, hostname `wawona-mobile-guest`, first boot. No Multi-User /
+  AUTH_OK / imported SHM / Mode A present yet.
+- Watchers: quiet MILESTONE (PID 3633), surface-flag on IMPORTED/AUTH.
+- Completely complete still **0%**.
 
 ### 2026-10-11 01:36 PDT — Finished Coldplug (shm-alive tip)
 
