@@ -7,11 +7,11 @@ Progress log: append-only section at bottom. One node per session when heavy.
 
 Completely complete stays **0%** until store IPA/TF Distribution on device
 is green (Development tip is lab evidence only). Twelve-gate judgment
-~**80%**: N16 Development tip on STARDUST now has `READY=1` + SHM frame
-`800x600` `5b6add91…` after BUFFER_DIFF soft-skip (vsock no longer RST).
-`AUTH_OK` / `TRANSPORT_STARTED` not seen this boot; host present of that
-frame still open. N16 ASC: **1791785768** `VALID` + `IN_BETA_TESTING`.
-AAB **GREEN**. N14 oci-live **GREEN**.
+~**85%**: sim tip PID 94696 (2026-10-14) has `READY=1` + `AUTH_OK=1` +
+multi-hash SHM (45+ frames / 8 sha256) + Metal present of 800x600 band
+(opaque blit + overwrite). Coherent guest UI and store TF still open.
+N16 ASC: **1791785768** `VALID` + `IN_BETA_TESTING`. AAB **GREEN**.
+N14 oci-live **GREEN**.
 
 ## Stop rule
 
@@ -116,6 +116,21 @@ N10 mode-a-present (live)
 - Do not regress Relay Wasm Runtime
 
 ## Progress log
+
+### 2026-10-14 ~10:40 PDT — READY+AUTH_OK+multi-hash SHM+Metal present
+
+- Tip PID **94696**. Evidence this boot:
+  - `WAWONA_RELAY_READY=1` @gt ~484
+  - `WAWONA_RELAY_AUTH_OK=1` @gt ~565
+  - SHM: **45** imported frames, **8** unique sha256 (overwrite live)
+  - Host Metal: noise band on session surface (not teal, not stuck
+    first-frame black). Artifact
+    `.agent-device/test-artifacts/ios-shm-auth-ok.png`
+  - Opaque blit fix (`90516ecc`) + shm overwrite (`f23b852`) proven
+    together on sim.
+- Still open: coherent guest UI (not noise band); Multi-Touch+Stop;
+  TRANSPORT string if required by gate; N16 store TF human-gated.
+- Completely complete still **0%**.
 
 ### 2026-10-14 ~10:34 PDT — tick 23; Coldplug done → Network
 
