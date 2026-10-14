@@ -119,6 +119,14 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~10:58 PDT — graph tick 27 (loop #25)
+
+- Tip PID **94696** ~48m. SHM still **60**/8. AUTH held from earlier boot.
+- Guest-4k rebuild (simple-shm) evaluating; nix eval-cache SQLite busy once,
+  log `/tmp/relay-guest-4k-simple-shm.log`. Await out-link then embed+reinstall.
+- Formal log missing → rearmed `scripts/verify-formal.sh`.
+- N16 store TF still human-gated. Completely complete **0%**.
+
 ### 2026-10-14 ~10:55 PDT — graph tick 26; sessionCommand → simple-shm
 
 - Guest `configuration.nix`: `weston-presentation-shm` →
