@@ -50,6 +50,9 @@ pub enum ContainerCommand {
     Create { manifest_digest: String },
     Start,
     Stop,
+    /// Force-kill the guest crun process (`crun kill` then delete).
+    /// Distinct from Stop (graceful) and Delete (bundle teardown only).
+    Kill,
     Logs { cursor: u64 },
     Delete,
 }
@@ -709,6 +712,20 @@ mod tests {
         };
         let invalid_diff_id = format!("sha256:{:x}", Sha256::digest(&invalid));
         assert!(validate_layer(&invalid_descriptor, &invalid, &invalid_diff_id).is_err());
+    }
+
+    #[test]
+    fn thin_lifecycle_commands_round_trip() {
+        for command in [
+            ContainerCommand::Start,
+            ContainerCommand::Stop,
+            ContainerCommand::Kill,
+            ContainerCommand::Delete,
+        ] {
+            let request = ContainerRequest::new(9, "thin-oci".into(), command);
+            let frame = encode_control(&request).unwrap();
+            assert_eq!(decode_control(&frame).unwrap(), request);
+        }
     }
 
     #[test]

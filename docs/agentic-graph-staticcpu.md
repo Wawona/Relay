@@ -120,6 +120,16 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~15:05 PDT — tick 49; tip 52101 systemd presets; OCI Kill land
+
+- Tip **52101** ~30m host. systemd Welcome + first-boot presets; SHM listen
+  vsock **1024** armed. READY/AUTH/imported frame still 0 (pre Multi-User).
+- `ContainerCommand::Kill` + `thin_lifecycle_commands_round_trip` + guest
+  `postStop` `crun kill … KILL`. `cargo test -p relay-oci --lib` 14/14.
+- N10 wiring **OK** (formal stamp current). N15 sources **PARTIAL_OK**.
+- N14 live already GREEN (fix6). macOS titlebar-over-SHM fix in Wawona tree.
+- Completely complete **0%**. N16 store TF human-gated.
+
 ### 2026-10-14 ~14:46 PDT — tick 48; tip 52101 Stage 1 LVM
 
 - Tip **52101** ~12m. Stage 1 (device mapper/LVM). READY/AUTH/SHM 0.

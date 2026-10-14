@@ -873,7 +873,10 @@ PY
       exec ${pkgs.waypipe}/bin/waypipe --no-gpu --compress none --vsock -s ${toString vsockPort} server -- \
         ${pkgs.crun}/bin/crun run --bundle "$work" wawona-oci
     '';
+    # Stop = SIGTERM to waypipe/crun. Kill path (ContainerCommand::Kill /
+    # systemd kill) uses SIGKILL then force-delete so thin lifecycle closes.
     postStop = ''
+      ${pkgs.crun}/bin/crun kill wawona-oci KILL >/dev/null 2>&1 || true
       ${pkgs.crun}/bin/crun delete --force wawona-oci >/dev/null 2>&1 || true
     '';
   };
