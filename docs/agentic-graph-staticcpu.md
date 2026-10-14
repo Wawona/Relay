@@ -120,6 +120,14 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~14:10 PDT — tip 35050 Stage1 udev/vsock; long monitor
+
+- Tip **35050** ~10m host. Guest Stage 1: udev + `PF_VSOCK`. Console still
+  growing. READY/AUTH/SHM 0. Long monitor shell 460817 (30s ticks).
+- Completely complete **0%**. N16 store TF human-gated.
+
+
+
 ### 2026-10-14 ~14:05 PDT — tick 44; tip 35050 still early kernel
 
 - Tip **35050** ~5m host, guest unpacking initramfs. READY/AUTH/SHM 0.
