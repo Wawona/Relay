@@ -119,6 +119,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:26 PDT — graph tick 32; formal stamp OK
+
+- `scripts/verify-formal.sh` **EXIT 0** (~7.4m). N10 **WIRING_OK** +
+  **FORMAL_STAMP_OK**. LIVE present still on tip boot.
+- Tip PID **33722** ~12m: Stage 2 only so far; READY/AUTH/SHM 0. Poll
+  continues for simple-shm face. Completely complete **0%**.
+
 ### 2026-10-14 ~11:24 PDT — graph tick 31 (loop #28)
 
 - Tip PID **33722** ~10m. Guest **NixOS Stage 2** reached (~elapsed_ms 545s).
