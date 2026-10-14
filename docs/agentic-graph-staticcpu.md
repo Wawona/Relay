@@ -119,6 +119,12 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:16 PDT — graph tick 30 (loop #27)
+
+- Guest-4k `simple-shm` nix build **EXIT 0** (~13m). Embed+wipe done earlier.
+- Tip PID **33722** ~2m wall: Stage 1 samples ~31s insn; SHM **0** frames
+  yet (listen/AUTH next). Completely complete **0%**.
+
 ### 2026-10-14 ~11:14 PDT — graph tick 29; simple-shm guest cold boot
 
 - Guest-4k out-link ready (`qh35y160…-wawona-mobile-guest-artifacts`).
