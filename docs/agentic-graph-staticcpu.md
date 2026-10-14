@@ -120,6 +120,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~14:37 PDT — tick 47; tip 52101 kernel boot
+
+- Rootfs unstuck (clonefile); grown **8G**. Tip **52101** console live,
+  early kernel. READY/AUTH/SHM 0. Monitor 460821. Completely complete **0%**.
+
+
+
 ### 2026-10-14 ~14:30 PDT — tick 46; tip 35050 TIP_DEAD; relaunch 49733
 
 - Tip **35050** died mid Stage 2; data container vanished (foreign
