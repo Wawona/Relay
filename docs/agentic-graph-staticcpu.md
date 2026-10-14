@@ -119,6 +119,16 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:14 PDT — graph tick 29; simple-shm guest cold boot
+
+- Guest-4k out-link ready (`qh35y160…-wawona-mobile-guest-artifacts`).
+  Embedded into tip `.app/wawona-nixos-guest-4k`. Wiped old
+  `relay-state/.../static-smoke-n10b` (stale presentation-shm disk).
+- Cold `SIMCTL_CHILD_WWN_AUTO_START_MACHINE=static-smoke-n10b`: PID **33722**,
+  fresh console Stage 1 (~20s samples). Await Multi-User → AUTH → SHM →
+  Metal face (weston-simple-shm).
+- Completely complete still **0%**.
+
 ### 2026-10-14 ~11:09 PDT — graph tick 28 (loop #26)
 
 - Tip PID **94696** ~59m. SHM **60**/8. Find-sources job aborted (superseded).
