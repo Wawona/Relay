@@ -119,6 +119,14 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:09 PDT — graph tick 28 (loop #26)
+
+- Tip PID **94696** ~59m. SHM **60**/8. Find-sources job aborted (superseded).
+- Guest-4k `simple-shm` rebuild ~12m: `ext4-fs.img` e2fsck done / image close.
+  Out-link `.artifacts/relay-build/guest-4k-simple-shm`. Next: embed into tip
+  app + cold AUTO_START for face pattern present proof.
+- Formal log still empty (rearm failed write). Completely complete **0%**.
+
 ### 2026-10-14 ~10:58 PDT — graph tick 27 (loop #25)
 
 - Tip PID **94696** ~48m. SHM still **60**/8. AUTH held from earlier boot.
