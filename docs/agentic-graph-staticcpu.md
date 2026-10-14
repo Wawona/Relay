@@ -119,6 +119,15 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:36 PDT — graph tick 34; tip reinstall + Grow FAIL + restart
+
+- Unit verify find aborted (nix-store find). Closure proves session start
+  runs `weston-simple-shm` via waypipe.
+- Tip **33722** died after app reinstall (new UUID); Grow Root **FAILED** on
+  stuck first-boot disk. Re-embedded simple-shm guest (`aef0c426…`).
+- Cold restart: new PID; `rootfs.img` recreating. Await Stage1→AUTH→SHM face.
+- Completely complete **0%**.
+
 ### 2026-10-14 ~11:32 PDT — graph tick 33; Grow Root started
 
 - Tip PID **33722** ~16m. First-boot systemd: remount root OK, **Grow Root
