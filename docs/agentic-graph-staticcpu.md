@@ -119,6 +119,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~11:37 PDT — graph tick 35 (loop #29)
+
+- Prior 12m poll: **TIP_DEAD** (33722) after reinstall/Grow FAIL.
+- Formal await job EXIT 0; N10 stamp already **FORMAL_STAMP_OK**.
+- Tip PID **52862**: console only `Relay boot trace` so far (rootfs 8G).
+  Poll armed `/tmp/staticcpu-poll-52862.log`. Completely complete **0%**.
+
 ### 2026-10-14 ~11:36 PDT — graph tick 34; tip reinstall + Grow FAIL + restart
 
 - Unit verify find aborted (nix-store find). Closure proves session start
