@@ -119,6 +119,16 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~10:55 PDT — graph tick 26; sessionCommand → simple-shm
+
+- Guest `configuration.nix`: `weston-presentation-shm` →
+  `weston-simple-shm` (comment already required simple-shm). Presentation
+  client is a timing HUD (c2p/f2p/p2p); on Metal letterbox it reads as
+  noise band. Rebuild: `nix build .#packages.aarch64-linux.wawona-nixos-guest-4k`
+  → `.artifacts/relay-build/guest-4k-simple-shm` (`/tmp/relay-guest-4k-simple-shm.log`).
+- Tip PID **94696** still AUTH; SHM plateau 60/8 until new guest embed.
+- Completely complete still **0%**.
+
 ### 2026-10-14 ~10:51 PDT — graph tick 25; N11 park + SHM stall note
 
 - Tip PID **94696**. N11: LLDB post `WWNDeviceDidShakeNotification` →
