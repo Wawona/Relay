@@ -117,6 +117,16 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~10:22 PDT — Metal fix pushed; tip Stage 2 systemd
+
+- Wawona `90516ecc` pushed: opaque Metal blit (A=0 black fix).
+  Relay `c3f0596` graph note. Tip PID **94696** sample: `static-1`
+  `run_slice` + AuthListener + shm Importer alive. Guest
+  `wawona-mobile-guest` systemd up (~gt 180+); SHM listen; no AUTH yet.
+  `scripts/verify-formal.sh` rearmed → `/tmp/relay-verify-formal.log`.
+  Await Coldplug → Multi-User → AUTH → multi-hash SHM (alpha fix live).
+- Completely complete still **0%**.
+
 ### 2026-10-14 ~10:14 PDT — graph ticks 20-21 (10m loop)
 
 - Tip PID **94696** still up; Metal clearProof teal already proven.
