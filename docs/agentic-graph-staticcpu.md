@@ -117,6 +117,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~10:34 PDT — tick 23; Coldplug done → Network
+
+- Tip PID **94696**. Coldplug finished @gt ~387. eth0 wait timed out
+  (classic; boot continued). **Network** + **Login Prompts** reached.
+  SHM still listen-only; AUTH/Wayland session next.
+- Completely complete still **0%**.
+
 ### 2026-10-14 ~10:24 PDT — graph tick 22; Grow Root OK
 
 - Tip PID **94696**. Guest `elapsed_ms` ~846s. **Finished Grow Root
