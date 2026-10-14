@@ -120,6 +120,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~14:46 PDT — tick 48; tip 52101 Stage 1 LVM
+
+- Tip **52101** ~12m. Stage 1 (device mapper/LVM). READY/AUTH/SHM 0.
+  Monitor 460821 alive. Completely complete **0%**.
+
+
+
 ### 2026-10-14 ~14:37 PDT — tick 47; tip 52101 kernel boot
 
 - Rootfs unstuck (clonefile); grown **8G**. Tip **52101** console live,
