@@ -117,6 +117,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~10:24 PDT — graph tick 22; Grow Root OK
+
+- Tip PID **94696**. Guest `elapsed_ms` ~846s. **Finished Grow Root
+  File System** @gt ~242. Coldplug still open; AUTH/SHM unset. Metal
+  clearProof teal held. Formal verify still running.
+- Completely complete still **0%**.
+
 ### 2026-10-14 ~10:22 PDT — Metal fix pushed; tip Stage 2 systemd
 
 - Wawona `90516ecc` pushed: opaque Metal blit (A=0 black fix).
