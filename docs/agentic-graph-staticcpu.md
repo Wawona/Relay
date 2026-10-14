@@ -7,11 +7,12 @@ Progress log: append-only section at bottom. One node per session when heavy.
 
 Completely complete stays **0%** until store IPA/TF Distribution on device
 is green (Development tip is lab evidence only). Twelve-gate judgment
-~**88%**: sim tip PID 94696 (2026-10-14) has `READY=1` + `AUTH_OK=1` +
-multi-hash SHM (60 frames / 8 sha256) + Metal opaque present + N11 park
-(shake inject → Machines AX; guest AUTH held). Guest session is
-`weston-presentation-shm` (band looks like noise by design). Cage+foot
-still open for recognizable UI. Store TF still open.
+~**88%**: prior tip had `READY=1` + `AUTH_OK=1` + multi-hash SHM + Metal
+opaque present (`90516ecc`) + N11 park. Tip **52862** hit Stage2 then
+`wawona-session` **ENOENT** on `weston-simple-shm` (nixpkgs weston 16
+dropped that binary; string-only store join). Fix: `weston-smoke`
+(`7910513`); guest-4k rebuild in flight. Metal present **not** claimed
+green for all Apple clients/compositors. Store TF still open.
 N16 ASC: **1791785768** `VALID` + `IN_BETA_TESTING`. AAB **GREEN**.
 N14 oci-live **GREEN**.
 
@@ -118,6 +119,21 @@ N10 mode-a-present (live)
 - Do not regress Relay Wasm Runtime
 
 ## Progress log
+
+### 2026-10-14 ~12:30 PDT — tip 52862 AUTH blocked; weston-smoke fix
+
+- Tip **52862** reached Login Prompts / multi-user. `wawona-session`
+  failed: `weston-simple-shm` **ENOENT** (nixpkgs weston **16.0.0** does
+  not ship that binary; string-only `${pkgs.weston}/bin/…` join).
+  `wawona-session-auth` dependency-failed. READY/AUTH/SHM stayed 0.
+- Fix pushed `7910513`: `sessionCommand` → `weston-smoke` (still in
+  package, wl_shm). Guest-4k rebuild running
+  (`.artifacts/relay-build/guest-4k-smoke`).
+- Metal opaque blit (`Wawona` `90516ecc`) stays landed. **Not** claiming
+  all Wayland clients/compositors green on every Apple build. Completely
+  complete **0%**.
+
+
 
 ### 2026-10-14 ~11:37 PDT — graph tick 35 (loop #29)
 
