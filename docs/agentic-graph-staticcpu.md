@@ -120,6 +120,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~14:15 PDT — tick 45; tip 35050 Stage 2 activation
+
+- Tip **35050** Stage 2 (`running activation script`). READY/AUTH/SHM 0.
+  Monitor 460817 alive. Completely complete **0%**.
+
+
+
 ### 2026-10-14 ~14:10 PDT — tip 35050 Stage1 udev/vsock; long monitor
 
 - Tip **35050** ~10m host. Guest Stage 1: udev + `PF_VSOCK`. Console still
