@@ -120,6 +120,19 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~16:40 PDT — tick 50; tip 88407 smoke relaunch
+
+- Prior tip **52101** reached READY=1 + SHM frames then stalled
+  (`shm_surface_prepare: all buffers are held by the server`); AUTH killed
+  on session restart; dims stuck **64x625** (not 800x600 smoke face).
+- Foreign `Wawona.app` overwrite mid-boot; recovered with
+  `/tmp/Wawona-smoke-tip.app` (`76bf4718…`) + wipe machine state +
+  `SIMCTL_CHILD_WWN_AUTO_START_MACHINE=static-smoke-n10b`. Tip **88407**.
+- Early Focus nudge + poll `/tmp/staticcpu-poll-relaunch.log`.
+- OCI Kill landed `25fdc99`. macOS titlebar present fix `35cc8bc6`.
+- Completely complete **0%**. N16 store TF human-gated (ASC 1791785768
+  already VALID/IN_BETA_TESTING).
+
 ### 2026-10-14 ~15:05 PDT — tick 49; tip 52101 systemd presets; OCI Kill land
 
 - Tip **52101** ~30m host. systemd Welcome + first-boot presets; SHM listen
