@@ -117,6 +117,34 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~10:14 PDT — graph ticks 20-21 (10m loop)
+
+- Tip PID **94696** still up; Metal clearProof teal already proven.
+- Guest early boot (`elapsed_ms` ~234s); SHM listen vsock 1024;
+  no `AUTH_OK` / imported frames yet. Await Multi-User → AUTH → SHM.
+- Completely complete still **0%**.
+
+### 2026-10-14 ~10:12 PDT — Metal present root cause + clearProof GREEN
+
+- **Why Apple present looked dead:** host Metal pipeline used
+  `srcAlpha` blend + fragment A passthrough. `wl_shm` XRGB / many
+  clients leave **A=0**, so blit composites to clear black. Session
+  surface stayed empty even when SHM arrived. Same path for all Apple
+  `IlandPresentEngine` present (IOSurface + BGRA).
+- Fix (Wawona tip Sources, not yet pushed): force `float4(c.rgb,1)` in
+  `wwn_fs`; disable blend; `CAMetalLayer.isOpaque=true`;
+  `presentClearProof` deep teal on first layout
+  (`CompositorHostView` / `IlandPresenter`).
+- Sim proof: PID **94696**, data `DF72B0D4…`, tip
+  `/tmp/Wawona-n10b-framefix-dd` (Watch embed stripped for lab Ld).
+  Screenshot
+  `.agent-device/test-artifacts/ios-metal-clearproof2.png`:
+  dominant `(13,56,71)` = clearProof teal (not black). Sparse AX =
+  session surface up.
+- Guest: SHM listen vsock 1024; Wayland session starting; AUTH/multi-hash
+  SHM next (alpha fix will show pixels when frames land).
+- Completely complete still **0%**.
+
 ### 2026-10-14 ~09:33 PDT — tip relaunched with guest + overwrite binary
 
 - First framefix install missed Embed guests → AUTO_START "requires a guest
