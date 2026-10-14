@@ -120,6 +120,16 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~14:04 PDT — tick 43; tip 35050 weston-smoke cold boot
+
+- Guest-4k smoke build **EXIT 0** (`76bf4718…`). Embedded into tip
+  `Wawona-smoke-tip.app`. Tip PID **35050**, `WWN_AUTO_START=static-smoke-n10b`.
+- Early kernel boot only; READY/AUTH/SHM still 0. Poll
+  `/tmp/staticcpu-poll-35050.log`. Metal opaque still landed; all-Apple
+  clients **not** claimed. Completely complete **0%**. N16 store TF human-gated.
+
+
+
 ### 2026-10-14 ~12:30 PDT — tip 52862 AUTH blocked; weston-smoke fix
 
 - Tip **52862** reached Login Prompts / multi-user. `wawona-session`
