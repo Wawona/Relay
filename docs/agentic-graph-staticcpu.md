@@ -120,6 +120,13 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~14:05 PDT — tick 44; tip 35050 still early kernel
+
+- Tip **35050** ~5m host, guest unpacking initramfs. READY/AUTH/SHM 0.
+  Poll script `/tmp/staticcpu-poll-35050.sh`. Completely complete **0%**.
+
+
+
 ### 2026-10-14 ~14:04 PDT — tick 43; tip 35050 weston-smoke cold boot
 
 - Guest-4k smoke build **EXIT 0** (`76bf4718…`). Embedded into tip
