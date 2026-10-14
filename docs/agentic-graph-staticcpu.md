@@ -120,6 +120,16 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~14:30 PDT — tick 46; tip 35050 TIP_DEAD; relaunch 49733
+
+- Tip **35050** died mid Stage 2; data container vanished (foreign
+  `Wawona.app` reinstall overwrote smoke guest with sha `b50d5bd2…`).
+- Reinstalled `/tmp/Wawona-smoke-tip.app` (`76bf4718…`). Tip PID **49733**,
+  `AUTO_START=static-smoke-n10b`. Monitor `/tmp/staticcpu-poll-49733.log`.
+- Completely complete **0%**.
+
+
+
 ### 2026-10-14 ~14:15 PDT — tick 45; tip 35050 Stage 2 activation
 
 - Tip **35050** Stage 2 (`running activation script`). READY/AUTH/SHM 0.
