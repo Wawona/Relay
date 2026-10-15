@@ -1738,3 +1738,9 @@ N10 mode-a-present (live)
 **Flush tip live** on `63A4C4D6` PID 25152. Binary has `PROTOCOL flush replies=`.
 **Per-UDID runtime works:** socket `/tmp/wawona_sim_503_63a4c4d6/wayland-0` (contested sim on `_9d70e2b7`). AUTO_START lab-synth guest=4k.
 **Poll:** AUTH+800x600 Metal (~40m wall class). Completely complete still 0% until that proof.
+
+## Tick 61 — 2026-10-15 ~01:20 PDT
+
+**Flush tip still held:** READY→held→AUTH kill loop; flush replies logged but only **64x625**; never 800x600.
+**Root cause 2:** `import_guest_pixels` early-returned after first surface (cursor), so prefer-largest never saw toplevel. BUFFER_DIFF `last_file` path imported pixels with **zero** `wl_buffer.release` queued (flush log absent after DIFF).
+**Fix:** commit all surfaces; clear committed on refresh_pool; `release_all_buffers` on last_file import. Formal green. Rebuild tip next.

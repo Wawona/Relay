@@ -719,10 +719,21 @@ impl MiniCompositor {
             let n = file.len().min(pool.bytes.len());
             pool.bytes[..n].copy_from_slice(&file[..n]);
         }
-        // Re-import on every pool update so BUFFER_DIFF after the first
-        // commit still refreshes pixels (old path skipped while committed
-        // was Some, then take_frame cleared it too late for that diff).
+        // Drop prior commit so BUFFER_DIFF can replace pixels (same dims).
+        // Prefer-largest still applies across surfaces in import_guest_pixels.
+        self.committed = None;
         let _ = self.import_guest_pixels();
+    }
+
+    /// Emit `wl_buffer.release` for every known buffer. Live tip evidence
+    /// (flush tip 2026-10-15): BUFFER_DIFF often imports via `last_file`
+    /// without a surface commit, so no release was queued and weston stalled
+    /// with `all buffers are held by the server` after the cursor (64x625).
+    fn release_all_buffers(&mut self) {
+        let ids: Vec<u32> = self.buffers.keys().copied().collect();
+        for id in ids {
+            self.emit_u32s(id, 0, &[]);
+        }
     }
 
     fn dispatch(&mut self, object: u32, opcode: u16, args: &[u8]) -> Result<(), RelayError> {
@@ -947,12 +958,15 @@ impl MiniCompositor {
     }
 
     fn import_guest_pixels(&mut self) -> Result<(), RelayError> {
+        // Commit every surface so prefer-largest can keep the toplevel
+        // (800x600) over the cursor (64x625). Early-return after the first
+        // surface left the tip stuck on cursor frames forever.
         let surfaces: Vec<u32> = self.surfaces.keys().copied().collect();
         for surface in surfaces {
             self.commit_surface(surface)?;
-            if self.committed.is_some() {
-                return Ok(());
-            }
+        }
+        if self.committed.is_some() {
+            return Ok(());
         }
         let buffer_ids: Vec<u32> = self.buffers.keys().copied().collect();
         for buffer_id in buffer_ids {
@@ -961,17 +975,35 @@ impl MiniCompositor {
             };
             if let Some(frame) = self.frame_from_buffer(&buffer)? {
                 if frame.pixels.iter().any(|byte| *byte != 0) {
-                    self.committed = Some(frame);
-                    // Same as commit_surface: guest must see release or it
-                    // stalls with all buffers held.
+                    let replace = match &self.committed {
+                        None => true,
+                        Some(prev) => {
+                            (frame.width as u64 * frame.height as u64)
+                                >= (prev.width as u64 * prev.height as u64)
+                        }
+                    };
+                    if replace {
+                        self.committed = Some(frame);
+                    }
                     self.emit_u32s(buffer_id, 0, &[]);
-                    return Ok(());
                 }
             }
         }
         if let Some(file) = self.last_file.clone() {
             if let Some(frame) = frame_from_shm_file(&file)? {
-                self.committed = Some(frame);
+                let replace = match &self.committed {
+                    None => true,
+                    Some(prev) => {
+                        (frame.width as u64 * frame.height as u64)
+                            >= (prev.width as u64 * prev.height as u64)
+                    }
+                };
+                if replace {
+                    self.committed = Some(frame);
+                }
+                // No surface commit on this path: release everything we know
+                // so the guest can recycle (cursor-only tip stall).
+                self.release_all_buffers();
             }
         }
         Ok(())
