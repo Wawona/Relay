@@ -94,6 +94,10 @@ if !isAppleMobile then
   })
 else
   rustPlatform.buildRustPackage (common // {
+    # Host Xcode Platforms (iphonesimulator / watchos / …). Without this,
+    # mkIOSBuildEnv's xcrun dies with "SDK not found" under Nix sandbox
+    # even when warm-ios-simulator-sdk.sh listed the SDK on the runner.
+    __noChroot = true;
     CARGO_BUILD_TARGET = cargoTarget;
     cargoBuildTarget = cargoTarget;
     # rustPlatform cargoInstallPostBuildHook copies host
