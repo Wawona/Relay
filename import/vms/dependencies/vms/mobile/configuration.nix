@@ -5,6 +5,20 @@
   imports = [ ./relay.nix ];
   networking.hostName = "wawona-mobile-guest";
   system.stateVersion = "24.11";
+  # Upstream weston-smoke hardcodes 200x200 and ignores xdg configure
+  # ("Don't resize me"). Mode A SHM acceptance needs OPEN_FILE 1.92MiB
+  # (800x600x4). Patch only the guest toy size; keep wl_shm path.
+  nixpkgs.overlays = [
+    (final: prev: {
+      weston = prev.weston.overrideAttrs (old: {
+        postPatch = (old.postPatch or "") + ''
+          substituteInPlace clients/smoke.c \
+            --replace-fail 'smoke.width = 200;' 'smoke.width = 800;' \
+            --replace-fail 'smoke.height = 200;' 'smoke.height = 600;'
+        '';
+      });
+    })
+  ];
   environment.systemPackages = with pkgs; [ cage foot wayland-utils weston ];
   # Cage+foot needs a full nested compositor. Mode A SHM acceptance uses a
   # CPU SHM client over waypipe --no-gpu.

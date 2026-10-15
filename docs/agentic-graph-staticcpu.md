@@ -1813,3 +1813,18 @@ deltas (lab-synth name `wawona-nixos-guest-4k`, per-UDID runtime, DIFF-before-
 buffer hard rejects). Reindex `wwn-knowledge-wawona`.
 **Next:** still tick-65 engineering: decode create_buffer / 800×600 pool;
 resume infer tip if needed. Completely complete still **0%**.
+
+## Tick 67 — 2026-10-15 ~14:10 PDT
+
+**Event:** Root cause for missing OPEN_FILE 1.92MiB: upstream `weston-smoke`
+(`clients/smoke.c`) hardcodes **200×200** and resize_handler ignores xdg
+configure ("Don't resize me"). Tick-65 160000-byte pools were the real smoke
+face, not a dim-heuristic bug. AUTH soft-dep guest `guest-4k-auth-soft` has
+`Wants=wawona-session.service` (not Requires). Wawona flake pin → Relay
+`9b31237`.
+**Fix:** guest overlay patches smoke.c → **800×600**. Rebuild
+`wawona-nixos-guest-4k` → `guest-4k-auth-soft`; tip sim build in flight.
+**Next:** embed new guest; exclusive `63A4C4D6` AUTO_START; prove AUTH_OK +
+`imported SHM frame: 800x600` + Mode A Metal present.
+**Human gate:** N16 unchanged. Completely complete still **0%**.
+
