@@ -1744,3 +1744,19 @@ N10 mode-a-present (live)
 **Flush tip still held:** READY→held→AUTH kill loop; flush replies logged but only **64x625**; never 800x600.
 **Root cause 2:** `import_guest_pixels` early-returned after first surface (cursor), so prefer-largest never saw toplevel. BUFFER_DIFF `last_file` path imported pixels with **zero** `wl_buffer.release` queued (flush log absent after DIFF).
 **Fix:** commit all surfaces; clear committed on refresh_pool; `release_all_buffers` on last_file import. Formal green. Rebuild tip next.
+
+## Tick 62 — 2026-10-15 ~02:05 PDT
+
+**Event:** releaseall tip (`6db4565`) still **held**: READY=1, only **64x625**, no
+`PROTOCOL flush replies` after BUFFER_DIFF, AUTH killed. OPEN_FILE never
+reached 800x600 (1.92MiB). Guest stalled at `all buffers are held`.
+**Root cause 3:** first BUFFER_DIFF often arrives **before** any `wl_buffer` in
+MiniCompositor. `last_file` import published cursor pixels with an empty
+`buffers` map → `release_all_buffers` no-op → guest never recycles.
+**Fix:** `refresh_pool` skips import when `buffers.is_empty()` (+ unit
+`refresh_pool_skips_import_without_wl_buffer`). N10 WIRING_OK on provisional
+stamp. Formal + `nix build .#wawona-ios-simulator --override-input wwn-relay
+path:/tmp/relay-skip-empty-src` → `/tmp/result-ios-sim-skipempty` in flight.
+**Next:** stage exclusive `63A4C4D6`; prove AUTH+800x600 Metal; then flake-lock
+pin after Relay push.
+**Human gate:** N16 unchanged. Completely complete still **0%**.

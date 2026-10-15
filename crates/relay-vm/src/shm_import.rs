@@ -719,6 +719,16 @@ impl MiniCompositor {
             let n = file.len().min(pool.bytes.len());
             pool.bytes[..n].copy_from_slice(&file[..n]);
         }
+        // Live tip: first BUFFER_DIFF often arrives before create_buffer
+        // PROTOCOL. Importing via last_file then published 64x625 with an
+        // empty buffers map (no wl_buffer.release possible) and weston
+        // stalled with all buffers held. Wait for real buffer objects.
+        if self.buffers.is_empty() {
+            shm_debug_log(
+                "Relay SHM import: refresh_pool skip import (no wl_buffer yet)",
+            );
+            return;
+        }
         // Drop prior commit so BUFFER_DIFF can replace pixels (same dims).
         // Prefer-largest still applies across surfaces in import_guest_pixels.
         self.committed = None;
@@ -1322,6 +1332,19 @@ mod tests {
         let mut file = vec![0u8; (width * height * 4) as usize];
         file[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0xff]);
         let mut compositor = MiniCompositor::new();
+        // refresh_pool skips import until a wl_buffer exists (waypipe order).
+        compositor.objects.insert(10, Object::Buffer);
+        compositor.buffers.insert(
+            10,
+            Buffer {
+                pool: 1,
+                offset: 0,
+                width: width as i32,
+                height: height as i32,
+                stride: (width * 4) as i32,
+            },
+        );
+        compositor.pools.insert(1, Pool { bytes: file.clone() });
         compositor.refresh_pool(&file);
         let frame = compositor.take_frame().expect("guest SHM pixels");
         assert_eq!(frame.width, 64);
@@ -1398,11 +1421,34 @@ mod tests {
         let mut file = vec![0u8; (width * height * 4) as usize];
         file[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0xff]);
         let mut compositor = MiniCompositor::new();
+        compositor.objects.insert(10, Object::Buffer);
+        compositor.buffers.insert(
+            10,
+            Buffer {
+                pool: 1,
+                offset: 0,
+                width: width as i32,
+                height: height as i32,
+                stride: (width * 4) as i32,
+            },
+        );
+        compositor.pools.insert(1, Pool { bytes: file.clone() });
         compositor.refresh_pool(&file);
         assert!(compositor.committed.is_some());
         file[0..4].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xff]);
         compositor.refresh_pool(&file);
         let frame = compositor.take_frame().expect("refreshed pixels");
         assert_eq!(&frame.pixels[..4], &[0xaa, 0xbb, 0xcc, 0xff]);
+    }
+
+    #[test]
+    fn refresh_pool_skips_import_without_wl_buffer() {
+        let file = vec![0x11u8; 64 * 64 * 4];
+        let mut compositor = MiniCompositor::new();
+        compositor.refresh_pool(&file);
+        assert!(
+            compositor.take_frame().is_none(),
+            "must not publish SHM frames before create_buffer"
+        );
     }
 }
