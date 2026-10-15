@@ -120,6 +120,21 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~19:34 PDT — tick 52; bufrel tip rebuild (clean worktree)
+
+- SHM fix tip `157d772`. Agent `nohup`/`disown` builds reaped on shell exit.
+- Root cause of silent multi-hour eval: `--impure path:…/Relay` hashed dirty
+  tree (`target/` **14G** + `relay-vm-state*` ~5G). Sample: `hashPath`/`pread`.
+- Fix: detached worktree `/tmp/relay-bufrel-src` @ `157d772` (**3.6M**, no
+  target). Attr is `.#wawona-ios-simulator` (not `wawona-ios-sim`). Build:
+  `--impure --override-input wwn-relay path:/tmp/relay-bufrel-src`.
+- Unit tests green with runner=`/usr/bin/env`:
+  `commit_keeps_larger_toplevel_over_cursor_surface`,
+  `committed_shm_bytes_hash_as_imported_frame`. Formal stamp still stale.
+- Stage: guest `wawona-nixos-guest-4k` (2.9G) from smoke tip; sim `9D70E2B7…`;
+  AUTO_START `static-smoke-n10b`. Prove AUTH + 800x600 + Metal (shm-ui).
+- Completely complete **0%**. N16 store TF human-gated.
+
 ### 2026-10-14 ~18:10 PDT — tick 51; wl_buffer.release + prefer toplevel
 
 - Root cause of `shm_surface_prepare: all buffers are held by the server`:
@@ -1665,3 +1680,49 @@ N10 mode-a-present (live)
   binary as host load grew. Fresh-guest A/B still decides disk vs host;
   next tip = bisect (N10b accept + VERSION-skip + 2s writes + TX logs).
 - Completely complete still **0%**.
+
+## Tick 53 — 2026-10-14 ~20:31 PDT
+
+**Event:** `.#wawona-ios-simulator` with Relay `157d772` (bufrel) **failed** after ~53m.
+**Root cause:** `rust_wawona` E0432/E0599 (`StyledLine`, `styled_lines`, `placed_images`). Workspace-src inject used stale Terminal FOD `sdda1j…` (1127-line screen, no Kitty) because eval started **19:37**, before lock bump `96b1f5f3` (20:05) that pins Terminal `d31eafb` → store `632p67…` (2245-line screen + StyledLine).
+**Provenance:** drv `53378kpa…-wawona-workspace-src` installPhase `cp …/sdda1j…/src/screen.rs`; log `✓ Terminal screen injected` (no kitty branch). Tip flake now resolves correct Terminal.
+**Next:** re-eval + rebuild `--override-input wwn-relay path:/tmp/relay-bufrel-src` → `/tmp/result-ios-sim-bufrel`; then `/tmp/stage-bufrel-tip.sh` + AUTO_START `static-smoke-n10b` for AUTH+800x600+Metal (shm-ui).
+**Human gate:** N16 / store TF / STARDUST unchanged.
+
+## Tick 54 — 2026-10-14 ~22:58 PDT
+
+**Event:** `.#wawona-ios-simulator` bufrel rebuild **EXIT=0** (`/tmp/result-ios-sim-bufrel` → store `cps99jhr…`). Tip binary has `start_shm_importer` + buffer release. StyledLine fail (tick 53) fixed by Terminal pin `d31eafb` / workspace-src `4797yvp0…`.
+**Stage:** tip staged with weston-smoke guest-4k; `shm rc=0`; AUTO_START `static-smoke-n10b` reached Stage 1→2→systemd first boot.
+**Blockers (fusion):** (1) Parallel agent `simctl install` overwrote `Wawona-smoke-tip.app` → plain `Wawona.app` mid-boot (twice). (2) Host memory pressure + competing macOS tip / runaway `openAndSavePanelService`. (3) After systemd welcome, console **froze** (~7m, host Wawona ~1% CPU) — StaticCpu not advancing; SHM still listen-only (164B).
+**Next:** exclusive tip ownership (no parallel install); free host CPU/RAM; wait AUTH+800x600 Metal or dig guest stall after first-boot systemd; then shm-ui screenshot.
+**Human gate:** N16 unchanged. Completely complete still **0%**.
+
+## Tick 55 — 2026-10-14 ~23:05 PDT
+
+**Event:** Exclusive tip relaunch overwritten at t+5 (~2.5m) by parallel agent `simctl install` of `Wawona.app` (framefix DD / other smoke loops). Lock file `/tmp/wawona-sim-install.lock` ignored.
+**Proven:** bufrel tip binary + smoke guest stage works; `shm rc=0`; Stage1→2 path live when tip undisturbed.
+**Fusion:** multi-agent sim ownership is the active edge. Guest also stalled once at systemd first-boot with host ~1% CPU (tick 54).
+**Stop rule:** do not fight install loops. Need single writer on UDID `9D70E2B7…` until AUTH+SHM Metal screenshot.
+**Human gate:** N16 unchanged. Completely complete **0%**.
+
+## Tick 56 — 2026-10-14 ~23:28 PDT
+
+**Event:** Moved tip to exclusive UDID `63A4C4D6…` (iPhone 17 Pro) after multi-agent overwrite on `9D70E2B7…`.
+**Hard fail found:** second sim AUTO_START died with `Failed to bind primary socket at /tmp/wawona_sim_503/wayland-0` — shared host `XDG_RUNTIME_DIR` for all sims same UID. Fix: kill other sim Wawona, rm stale `wayland-0`, relaunch. Socket up; tip CPU high.
+**Next:** wait AUTH+SHM Metal on exclusive sim; later product fix = per-UDID runtime dir (not `wawona_sim_<uid>` alone).
+
+## Tick 57 — 2026-10-14 ~23:35 PDT
+
+**Exclusive tip** UDID `63A4C4D6…` PID 56001 AUTO_START `static-smoke-n10b` ok (after socket reclaim).
+**Guest:** NixOS Stage 1 + udevd @ guest t~32s (~8m wall). Instructions climbing; SHM still listen-only.
+**False alarm:** host `/tmp/wawona_sim_503/relay-shm.log` had stale 64x625 frames from contested sim; truncate before poll.
+**Code:** `preferredSharedRuntimeDir` → `/tmp/wawona_sim_<uid>_<udid8>` (next tip). Current tip still on uid-only path.
+**Expect:** Stage 2 → Multi-User → AUTH_OK → weston-smoke 800x600 (~40m wall class historically).
+
+## Tick 58 — 2026-10-15 ~00:15 PDT
+
+**Live tip** `63A4C4D6` PID 56001 (~45m): Stage2 → Welcome → READY=1 x2.
+**Fail:** `shm_surface_prepare: all buffers are held by the server` again; SHM only **64x625** (cursor); AUTH killed on session restart. Tip has 157d772 release-on-commit strings.
+**Root cause:** `refresh_pool` (BUFFER_DIFF/FILL) queues `wl_buffer.release` into MiniCompositor replies but import loop only flushed replies on WMSG_PROTOCOL. Guest never saw release between diffs.
+**Fix:** `flush_protocol_replies` after BUFFER_DIFF/FILL (+ PROTOCOL); release on `frame_from_buffer` import path; unit `refresh_pool_queues_wl_buffer_release`.
+**Next:** cargo test → commit Relay → rebuild tip → relaunch AUTH+800x600 Metal.

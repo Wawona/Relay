@@ -419,7 +419,14 @@ fn import_stream(
                     // died with "Failed to dispatch remote Wayland display"
                     // before READY. Prefer keep stream + ACK.
                     match apply_buffer_diff(file, &buf[4..]) {
-                        Ok(()) => compositor.refresh_pool(file),
+                        Ok(()) => {
+                            compositor.refresh_pool(file);
+                            // refresh_pool re-commits and queues wl_buffer.release.
+                            // PROTOCOL is the only other drain site; without an
+                            // immediate flush the guest stalls with
+                            // `shm_surface_prepare: all buffers are held by the server`.
+                            flush_protocol_replies(&mut stream, &mut compositor, stop)?;
+                        }
                         Err(error) => shm_debug_log(&format!(
                             "Relay SHM import: BUFFER_DIFF remote={remote} skipped: {error}"
                         )),
@@ -436,20 +443,17 @@ fn import_stream(
                         let n = (end - start).min(data.len());
                         file[start..start + n].copy_from_slice(&data[..n]);
                         compositor.refresh_pool(file);
+                        flush_protocol_replies(&mut stream, &mut compositor, stop)?;
                     }
                 }
             }
             WMSG_PROTOCOL => {
                 compositor.feed(&buf, &files)?;
-                let replies = compositor.drain_protocol();
                 shm_debug_log(&format!(
-                    "Relay SHM import: PROTOCOL in={} replies={}",
-                    buf.len(),
-                    replies.len()
+                    "Relay SHM import: PROTOCOL in={}",
+                    buf.len()
                 ));
-                for reply in replies {
-                    write_protocol(&mut stream, &reply, stop)?;
-                }
+                flush_protocol_replies(&mut stream, &mut compositor, stop)?;
             }
             _ => {}
         }
@@ -536,6 +540,24 @@ fn write_protocol(
     out[0..4].copy_from_slice(&header(size as u32, WMSG_PROTOCOL).to_le_bytes());
     out[4..4 + proto.len()].copy_from_slice(proto);
     write_exact_interruptible(stream, &out, stop)
+}
+
+fn flush_protocol_replies(
+    stream: &mut UnixStream,
+    compositor: &mut MiniCompositor,
+    stop: &AtomicBool,
+) -> Result<(), RelayError> {
+    let replies = compositor.drain_protocol();
+    if !replies.is_empty() {
+        shm_debug_log(&format!(
+            "Relay SHM import: PROTOCOL flush replies={}",
+            replies.len()
+        ));
+    }
+    for reply in replies {
+        write_protocol(stream, &reply, stop)?;
+    }
+    Ok(())
 }
 
 fn write_exact_interruptible(
@@ -932,11 +954,17 @@ impl MiniCompositor {
                 return Ok(());
             }
         }
-        let buffers: Vec<Buffer> = self.buffers.values().cloned().collect();
-        for buffer in buffers {
+        let buffer_ids: Vec<u32> = self.buffers.keys().copied().collect();
+        for buffer_id in buffer_ids {
+            let Some(buffer) = self.buffers.get(&buffer_id).cloned() else {
+                continue;
+            };
             if let Some(frame) = self.frame_from_buffer(&buffer)? {
                 if frame.pixels.iter().any(|byte| *byte != 0) {
                     self.committed = Some(frame);
+                    // Same as commit_surface: guest must see release or it
+                    // stalls with all buffers held.
+                    self.emit_u32s(buffer_id, 0, &[]);
                     return Ok(());
                 }
             }
@@ -1290,6 +1318,45 @@ mod tests {
         let got = sink.lock().unwrap().take().expect("latest frame");
         assert_eq!(got.pixels[0], 2);
         assert_eq!(got.sha256[0], 2);
+    }
+
+    #[test]
+    fn refresh_pool_queues_wl_buffer_release() {
+        // BUFFER_DIFF → refresh_pool must queue release the same way commit does.
+        // Import stream now flushes that queue immediately; this asserts the queue.
+        let mut compositor = MiniCompositor::new();
+        compositor.objects.insert(1, Object::Surface);
+        compositor.objects.insert(10, Object::Buffer);
+        compositor.pools.insert(
+            1,
+            Pool {
+                bytes: vec![0xabu8; 64 * 64 * 4],
+            },
+        );
+        compositor.buffers.insert(
+            10,
+            Buffer {
+                pool: 1,
+                offset: 0,
+                width: 64,
+                height: 64,
+                stride: 64 * 4,
+            },
+        );
+        compositor.surfaces.insert(1, Surface { buffer: Some(10) });
+        let file = vec![0xabu8; 64 * 64 * 4];
+        compositor.refresh_pool(&file);
+        assert!(compositor.committed.is_some());
+        let replies = compositor.drain_protocol();
+        let release = replies.iter().any(|msg| {
+            msg.len() >= 8
+                && u32::from_le_bytes(msg[0..4].try_into().unwrap()) == 10
+                && (u32::from_le_bytes(msg[4..8].try_into().unwrap()) & 0xffff) == 0
+        });
+        assert!(
+            release,
+            "refresh_pool must queue wl_buffer.release for BUFFER_DIFF flush"
+        );
     }
 
     #[test]
