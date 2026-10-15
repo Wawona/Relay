@@ -120,6 +120,18 @@ N10 mode-a-present (live)
 
 ## Progress log
 
+### 2026-10-14 ~18:10 PDT — tick 51; wl_buffer.release + prefer toplevel
+
+- Root cause of `shm_surface_prepare: all buffers are held by the server`:
+  MiniCompositor `commit_surface` never emitted `wl_buffer.release`.
+- Also preferred largest committed frame so cursor (64x625) cannot replace
+  weston-smoke toplevel (800x600).
+- Unit tests: `committed_shm_bytes_hash_as_imported_frame` (release assert) +
+  `commit_keeps_larger_toplevel_over_cursor_surface` green.
+- Tip 88407 READY=1 but AUTH stalled; Simulator later Shutdown. Rebuild tip
+  with this Relay + relaunch for Metal face.
+- Completely complete **0%**. N16 store TF human-gated.
+
 ### 2026-10-14 ~16:40 PDT — tick 50; tip 88407 smoke relaunch
 
 - Prior tip **52101** reached READY=1 + SHM frames then stalled

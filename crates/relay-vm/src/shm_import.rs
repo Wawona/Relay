@@ -871,9 +871,11 @@ impl MiniCompositor {
             return Ok(());
         };
         if buffer.width <= 0 || buffer.height <= 0 || buffer.stride <= 0 {
+            self.emit_u32s(buffer_id, 0, &[]);
             return Ok(());
         }
         let Some(pool) = self.pools.get(&buffer.pool) else {
+            self.emit_u32s(buffer_id, 0, &[]);
             return Ok(());
         };
         let width = buffer.width as u32;
@@ -890,18 +892,35 @@ impl MiniCompositor {
             }
         }
         if pixels.len() < MIN_FRAME && pixels.iter().all(|b| *b == 0) {
+            // Still release so the client can recycle the buffer. Skipping
+            // release here is what produced
+            // `shm_surface_prepare: all buffers are held by the server`.
+            self.emit_u32s(buffer_id, 0, &[]);
             return Ok(());
         }
         if pixels.is_empty() {
+            self.emit_u32s(buffer_id, 0, &[]);
             return Ok(());
         }
         let sha256 = frame_hash(&pixels)?;
-        self.committed = Some(ImportedFrame {
+        let next = ImportedFrame {
             width,
             height,
             pixels,
             sha256,
-        });
+        };
+        // Keep the largest committed frame. Cursor / decoration surfaces
+        // (e.g. 64x625) must not replace the toplevel smoke face (800x600).
+        let replace = match &self.committed {
+            None => true,
+            Some(prev) => (width as u64 * height as u64) >= (prev.width as u64 * prev.height as u64),
+        };
+        if replace {
+            self.committed = Some(next);
+        }
+        // wl_buffer.release (opcode 0, no args). Without this, weston-smoke
+        // stalls after a few commits and AUTH dies with the session restart.
+        self.emit_u32s(buffer_id, 0, &[]);
         Ok(())
     }
 
@@ -1152,6 +1171,55 @@ mod tests {
         assert_eq!(frame.height, 64);
         assert_eq!(&frame.pixels[..4], &[0x11, 0x22, 0x33, 0xff]);
         assert_eq!(frame.sha256, frame_hash(&frame.pixels).unwrap());
+        // wl_buffer.release must be in the reply stream after commit.
+        let replies = compositor.drain_protocol();
+        let release = replies.iter().any(|msg| {
+            msg.len() >= 8
+                && u32::from_le_bytes(msg[0..4].try_into().unwrap()) == 5
+                && (u32::from_le_bytes(msg[4..8].try_into().unwrap()) & 0xffff) == 0
+        });
+        assert!(release, "commit must emit wl_buffer.release");
+    }
+
+    #[test]
+    fn commit_keeps_larger_toplevel_over_cursor_surface() {
+        let mut compositor = MiniCompositor::new();
+        compositor.objects.insert(1, Object::Surface);
+        compositor.objects.insert(2, Object::Surface);
+        compositor.objects.insert(10, Object::Buffer);
+        compositor.objects.insert(11, Object::Buffer);
+        compositor.pools.insert(1, Pool {
+            bytes: vec![0xabu8; 800 * 600 * 4],
+        });
+        compositor.pools.insert(2, Pool {
+            bytes: vec![0xcdu8; 64 * 625 * 4],
+        });
+        compositor.buffers.insert(
+            10,
+            Buffer {
+                pool: 1,
+                offset: 0,
+                width: 800,
+                height: 600,
+                stride: 800 * 4,
+            },
+        );
+        compositor.buffers.insert(
+            11,
+            Buffer {
+                pool: 2,
+                offset: 0,
+                width: 64,
+                height: 625,
+                stride: 64 * 4,
+            },
+        );
+        compositor.surfaces.insert(1, Surface { buffer: Some(10) });
+        compositor.surfaces.insert(2, Surface { buffer: Some(11) });
+        compositor.commit_surface(1).unwrap();
+        compositor.commit_surface(2).unwrap();
+        let frame = compositor.take_frame().expect("toplevel frame");
+        assert_eq!((frame.width, frame.height), (800, 600));
     }
 
     #[test]
