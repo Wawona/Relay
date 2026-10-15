@@ -1787,3 +1787,17 @@ still starved.
 missing. Unit `attach_synthesizes_buffer_from_last_file_after_diff` green.
 **Next:** rebuild tip; prove imported 800x600 + Metal screenshot.
 **Human gate:** N16 unchanged. Completely complete still **0%**.
+
+## Tick 65 — 2026-10-15 ~04:15 PDT
+
+**Event:** synth tip (`05bca3e`) exclusive `63A4C4D6` PID 12060.
+**Proven:** `READY=1` + `AUTH_OK=1` + **held=0** + continuous SHM import
+(`synthesize buffer=18 64x625` → `imported SHM frame: 64x625` ×100+) +
+host log **`Mode A SHM present 64x625`**. Screenshot under
+`.agent-device/test-artifacts/synth-auth-present-64x625-*.png`.
+**Gap:** guest never `OPEN_FILE` 1.92MiB (800×600). Only remote=1 (38272) +
+remote=2 (160000). Dim heuristic maps 160000→64×625; may be wrong vs real
+create_buffer (still unparsed). weston-smoke face 800×600 not on wire yet.
+**Next:** decode PROTOCOL create_buffer args; fix dim infer / xdg configure
+so toplevel 800×600 pool appears; then METAL_PROOF.
+**Human gate:** N16 unchanged. Completely complete still **0%**.
