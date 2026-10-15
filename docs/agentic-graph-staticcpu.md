@@ -1726,3 +1726,9 @@ N10 mode-a-present (live)
 **Root cause:** `refresh_pool` (BUFFER_DIFF/FILL) queues `wl_buffer.release` into MiniCompositor replies but import loop only flushed replies on WMSG_PROTOCOL. Guest never saw release between diffs.
 **Fix:** `flush_protocol_replies` after BUFFER_DIFF/FILL (+ PROTOCOL); release on `frame_from_buffer` import path; unit `refresh_pool_queues_wl_buffer_release`.
 **Next:** cargo test → commit Relay → rebuild tip → relaunch AUTH+800x600 Metal.
+
+## Tick 59 — 2026-10-15 ~00:27 PDT
+
+**Landed:** Relay `fc1ee71` BUFFER_DIFF release flush (+ `ce68503` stamp untrack). Wawona `c6afa300` pins Relay + per-UDID `XDG_RUNTIME_DIR`.
+**Prior tip evidence:** READY=1 x5, buffers-held x5, SHM only 64x625, AUTH=0. Killed for rebuild.
+**Now:** `nix build .#wawona-ios-simulator -o /tmp/result-ios-sim-flush` running (crate2nix). Next: stage exclusive sim `63A4C4D6`, AUTO_START, prove AUTH+800x600 Metal.
