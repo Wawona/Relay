@@ -642,12 +642,19 @@ in
   systemd.services.wawona-session-auth = {
     description = "Wawona Relay authenticated readiness over vsock";
     wantedBy = [ "multi-user.target" ];
+    # Soft dep only. weston-smoke (sessionCommand) exits after a short
+    # demo; wawona-session Restart=always then SIGTERMs any unit that
+    # `requires` it. Tip evidence 2026-10-15: auth died ~20-35s into the
+    # WWN1 handshake (status=15) every restart, so AUTH_OK never printed.
     after = [ "wawona-session.service" ];
-    requires = [ "wawona-session.service" ];
+    wants = [ "wawona-session.service" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
       TimeoutStartSec = "180s";
+      # Retry when handshake races a session bounce (connect miss / TERM).
+      Restart = "on-failure";
+      RestartSec = "3s";
       StandardOutput = "journal+console";
       StandardError = "journal+console";
     };
@@ -658,7 +665,9 @@ in
     ];
     script = ''
       set -eu
-      systemctl is-active --quiet wawona-session.service
+      # Session may be mid-restart (weston-smoke short life). Do not hard-fail.
+      systemctl is-active --quiet wawona-session.service \
+        || echo "WAWONA_RELAY_AUTH_WARN=session-not-active"
       ${pkgs.python3}/bin/python3 - <<'PY'
 import binascii, ctypes, hashlib, hmac, socket, struct, sys
 unit = "multi-user+wawona-session"
@@ -676,8 +685,9 @@ s.settimeout(45)
 try:
     s.connect((2, 1025))
 except OSError as exc:
-    print(f"WAWONA_RELAY_AUTH_SKIP=connect:{exc}")
-    sys.exit(0)
+    # Non-zero so systemd Restart=on-failure retries across session bounces.
+    print(f"WAWONA_RELAY_AUTH_FAIL=connect:{exc}")
+    sys.exit(1)
 f = s.makefile("rwb", buffering=0)
 key_line = f.readline().decode().strip()
 chal_line = f.readline().decode().strip()

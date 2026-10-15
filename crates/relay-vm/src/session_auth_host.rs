@@ -173,6 +173,7 @@ fn serve_one(
     writer
         .flush()
         .map_err(|e| RelayError::Failed(format!("auth flush: {e}")))?;
+    eprintln!("relay auth: sent WWN1 KEY+CHALLENGE; waiting READY");
     let mut line = String::new();
     reader
         .read_line(&mut line)
@@ -182,6 +183,10 @@ fn serve_one(
     writer
         .write_all(b"WWN1 OK\n")
         .map_err(|e| RelayError::Failed(format!("auth ack: {e}")))?;
+    eprintln!(
+        "relay auth: WWN1 OK machine={} session={}",
+        response.machine_id, response.session_id
+    );
     Ok(AuthenticatedReady {
         machine_id: response.machine_id,
         session_id: response.session_id,

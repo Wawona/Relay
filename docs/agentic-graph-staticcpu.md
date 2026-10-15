@@ -1801,3 +1801,15 @@ create_buffer (still unparsed). weston-smoke face 800×600 not on wire yet.
 **Next:** decode PROTOCOL create_buffer args; fix dim infer / xdg configure
 so toplevel 800×600 pool appears; then METAL_PROOF.
 **Human gate:** N16 unchanged. Completely complete still **0%**.
+
+## Tick 66 — 2026-10-15 ~04:35 PDT
+
+**Event:** learn capture (user: update MCP RAG / skills / rules / agentic).
+**Landed:** skill `wawona-staticcpu-shm-tip`; rule
+`wawona-staticcpu-shm-tip` (workspace + Wawona + docs); RAG
+`wwn-mcp/knowledge/wawona/staticcpu-shm-tip.md` + section in
+`wawona-relay.md`; priors + `wawona-ios-sim-runtime` + `wawona-relay` skill
+deltas (lab-synth name `wawona-nixos-guest-4k`, per-UDID runtime, DIFF-before-
+buffer hard rejects). Reindex `wwn-knowledge-wawona`.
+**Next:** still tick-65 engineering: decode create_buffer / 800×600 pool;
+resume infer tip if needed. Completely complete still **0%**.
