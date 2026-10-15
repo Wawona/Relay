@@ -860,12 +860,26 @@ impl MiniCompositor {
                         stride: read_i32(args, 16)?,
                     },
                 );
+                shm_debug_log(&format!(
+                    "Relay SHM import: create_buffer id={new_id} {}x{}",
+                    read_i32(args, 8).unwrap_or(0),
+                    read_i32(args, 12).unwrap_or(0)
+                ));
+                // waypipe often BUFFER_DIFF before create_buffer. Skip left
+                // last_file set with no release. Catch up now so the guest
+                // is not stuck in shm_surface_prepare held.
+                if self.last_file.is_some() {
+                    let _ = self.import_guest_pixels();
+                }
             }
             Some(Object::Surface) if opcode == 1 => {
                 let buffer = read_u32(args, 0)?;
                 if let Some(surface) = self.surfaces.get_mut(&object) {
                     surface.buffer = Some(buffer);
                 }
+                shm_debug_log(&format!(
+                    "Relay SHM import: attach surface={object} buffer={buffer}"
+                ));
             }
             Some(Object::Surface) if opcode == 3 => {
                 let new_id = read_u32(args, 0)?;
@@ -873,6 +887,7 @@ impl MiniCompositor {
                 self.emit_u32s(new_id, 0, &[1]);
             }
             Some(Object::Surface) if opcode == 6 => {
+                shm_debug_log(&format!("Relay SHM import: commit surface={object}"));
                 self.commit_surface(object)?;
             }
             Some(Object::WmBase) if opcode == 2 => {
@@ -910,7 +925,10 @@ impl MiniCompositor {
         let Some(buffer_id) = self.surfaces.get(&surface).and_then(|s| s.buffer) else {
             return Ok(());
         };
+        // Always release once the client attached a buffer id, even if we
+        // never parsed create_buffer (otherwise weston stalls held forever).
         let Some(buffer) = self.buffers.get(&buffer_id).cloned() else {
+            self.emit_u32s(buffer_id, 0, &[]);
             return Ok(());
         };
         if buffer.width <= 0 || buffer.height <= 0 || buffer.stride <= 0 {
@@ -1450,5 +1468,34 @@ mod tests {
             compositor.take_frame().is_none(),
             "must not publish SHM frames before create_buffer"
         );
+    }
+
+    #[test]
+    fn create_buffer_after_diff_catchup_releases() {
+        // Live tip order: BUFFER_DIFF (skip) → PROTOCOL create_buffer.
+        let file = vec![0x22u8; 64 * 64 * 4];
+        let mut compositor = MiniCompositor::new();
+        compositor.refresh_pool(&file);
+        assert!(compositor.take_frame().is_none());
+        compositor.objects.insert(1, Object::Pool);
+        compositor.pools.insert(1, Pool { bytes: file.clone() });
+        // Pool.create_buffer (opcode 0) must catch up import + release.
+        let mut args = Vec::new();
+        args.extend_from_slice(&10u32.to_le_bytes());
+        args.extend_from_slice(&0i32.to_le_bytes());
+        args.extend_from_slice(&64i32.to_le_bytes());
+        args.extend_from_slice(&64i32.to_le_bytes());
+        args.extend_from_slice(&(64i32 * 4).to_le_bytes());
+        args.extend_from_slice(&0i32.to_le_bytes()); // format
+        compositor.dispatch(1, 0, &args).unwrap();
+        let frame = compositor.take_frame().expect("catch-up import");
+        assert_eq!((frame.width, frame.height), (64, 64));
+        let replies = compositor.drain_protocol();
+        let release = replies.iter().any(|msg| {
+            msg.len() >= 8
+                && u32::from_le_bytes(msg[0..4].try_into().unwrap()) == 10
+                && (u32::from_le_bytes(msg[4..8].try_into().unwrap()) & 0xffff) == 0
+        });
+        assert!(release, "create_buffer catch-up must emit wl_buffer.release");
     }
 }

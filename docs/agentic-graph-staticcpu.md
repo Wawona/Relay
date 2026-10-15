@@ -1760,3 +1760,17 @@ path:/tmp/relay-skip-empty-src` → `/tmp/result-ios-sim-skipempty` in flight.
 **Next:** stage exclusive `63A4C4D6`; prove AUTH+800x600 Metal; then flake-lock
 pin after Relay push.
 **Human gate:** N16 unchanged. Completely complete still **0%**.
+
+## Tick 63 — 2026-10-15 ~02:50 PDT
+
+**Event:** skip-empty tip (`8564a91`) LIVE on `63A4C4D6` PID 31894. Guest
+READY=1 then **held** again. SHM log: `skip import` ×3, **zero** imported
+frames (ghost 64x625 gone). Wire order: OPEN_FILE → BUFFER_DIFF(skip) →
+INJECT_RIDS → PROTOCOL flush=1. Never 800x600 OPEN_FILE.
+**Root cause 4:** skip alone does not emit `wl_buffer.release`. create_buffer
+arrives **after** DIFF; without catch-up import/release the guest stays in
+`shm_surface_prepare: all buffers are held`.
+**Fix:** on `Pool.create_buffer`, if `last_file` set, `import_guest_pixels`
+(catch-up). `commit_surface` releases even when buffer id missing from map.
+**Next:** commit Relay → rebuild tip → prove AUTH+800x600 Metal.
+**Human gate:** N16 unchanged. Completely complete still **0%**.
