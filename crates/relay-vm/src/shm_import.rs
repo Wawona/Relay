@@ -942,7 +942,44 @@ impl MiniCompositor {
                 let new_id = read_u32(args, 4).or_else(|_| read_u32(args, 0))?;
                 self.objects.insert(new_id, Object::PresentationFeedback);
             }
-            _ => {}
+            Some(Object::Shm) => {
+                shm_debug_log(&format!(
+                    "Relay SHM import: unhandled wl_shm object={object} opcode={opcode} args={}",
+                    args.len()
+                ));
+            }
+            Some(Object::Pool) => {
+                shm_debug_log(&format!(
+                    "Relay SHM import: unhandled wl_shm_pool object={object} opcode={opcode} args={}",
+                    args.len()
+                ));
+            }
+            Some(other) => {
+                let kind = match other {
+                    Object::Compositor => "compositor",
+                    Object::Surface => "surface",
+                    Object::WmBase => "xdg_wm_base",
+                    Object::XdgSurface => "xdg_surface",
+                    Object::Toplevel => "xdg_toplevel",
+                    Object::Seat => "seat",
+                    Object::Pointer => "pointer",
+                    Object::Keyboard => "keyboard",
+                    Object::Output => "output",
+                    Object::Display => "display",
+                    Object::Registry => "registry",
+                    _ => "other",
+                };
+                shm_debug_log(&format!(
+                    "Relay SHM import: unhandled {kind} object={object} opcode={opcode} args={}",
+                    args.len()
+                ));
+            }
+            None => {
+                shm_debug_log(&format!(
+                    "Relay SHM import: unknown object={object} opcode={opcode} args={}",
+                    args.len()
+                ));
+            }
         }
         Ok(())
     }
@@ -1158,12 +1195,30 @@ impl MiniCompositor {
 
 fn infer_shm_dims(len: usize) -> Option<(u32, u32)> {
     if len >= 800 * 600 * 4 {
-        Some((800, 600))
-    } else if len >= MIN_FRAME && len % (64 * 4) == 0 {
-        Some((64, (len / (64 * 4)) as u32))
-    } else {
-        None
+        return Some((800, 600));
     }
+    // Prefer near-square / 4:3 factors before the tall 64×N cursor heuristic.
+    // 160000 → 200×200 (weston toy) not 64×625.
+    let pixels = len / 4;
+    if len >= MIN_FRAME && len % 4 == 0 {
+        for &(w, h) in &[
+            (200u32, 200u32),
+            (250, 160),
+            (160, 250),
+            (320, 100),
+            (100, 320),
+            (400, 100),
+            (100, 400),
+        ] {
+            if w * h == pixels as u32 {
+                return Some((w, h));
+            }
+        }
+        if len % (64 * 4) == 0 {
+            return Some((64, (len / (64 * 4)) as u32));
+        }
+    }
+    None
 }
 
 fn frame_from_shm_file(file: &[u8]) -> Result<Option<ImportedFrame>, RelayError> {
