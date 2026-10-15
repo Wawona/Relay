@@ -1732,3 +1732,9 @@ N10 mode-a-present (live)
 **Landed:** Relay `fc1ee71` BUFFER_DIFF release flush (+ `ce68503` stamp untrack). Wawona `c6afa300` pins Relay + per-UDID `XDG_RUNTIME_DIR`.
 **Prior tip evidence:** READY=1 x5, buffers-held x5, SHM only 64x625, AUTH=0. Killed for rebuild.
 **Now:** `nix build .#wawona-ios-simulator -o /tmp/result-ios-sim-flush` running (crate2nix). Next: stage exclusive sim `63A4C4D6`, AUTO_START, prove AUTH+800x600 Metal.
+
+## Tick 60 — 2026-10-15 ~00:51 PDT
+
+**Flush tip live** on `63A4C4D6` PID 25152. Binary has `PROTOCOL flush replies=`.
+**Per-UDID runtime works:** socket `/tmp/wawona_sim_503_63a4c4d6/wayland-0` (contested sim on `_9d70e2b7`). AUTO_START lab-synth guest=4k.
+**Poll:** AUTH+800x600 Metal (~40m wall class). Completely complete still 0% until that proof.
