@@ -874,8 +874,34 @@ impl MiniCompositor {
             }
             Some(Object::Surface) if opcode == 1 => {
                 let buffer = read_u32(args, 0)?;
+                // Live tip: BUFFER_DIFF + attach arrive before create_buffer
+                // is parsed (or create_buffer never matches). Synthesize a
+                // buffer from last_file so commit can import pixels.
+                if buffer != 0 && !self.buffers.contains_key(&buffer) {
+                    if let Some(file) = self.last_file.clone() {
+                        if let Some((width, height)) = infer_shm_dims(file.len()) {
+                            let pool_id = 0xfffe_0000u32 | (buffer & 0xffff);
+                            self.objects.insert(pool_id, Object::Pool);
+                            self.pools.insert(pool_id, Pool { bytes: file });
+                            self.objects.insert(buffer, Object::Buffer);
+                            self.buffers.insert(
+                                buffer,
+                                Buffer {
+                                    pool: pool_id,
+                                    offset: 0,
+                                    width: width as i32,
+                                    height: height as i32,
+                                    stride: (width * 4) as i32,
+                                },
+                            );
+                            shm_debug_log(&format!(
+                                "Relay SHM import: synthesize buffer={buffer} {width}x{height} from last_file"
+                            ));
+                        }
+                    }
+                }
                 if let Some(surface) = self.surfaces.get_mut(&object) {
-                    surface.buffer = Some(buffer);
+                    surface.buffer = if buffer == 0 { None } else { Some(buffer) };
                 }
                 shm_debug_log(&format!(
                     "Relay SHM import: attach surface={object} buffer={buffer}"
@@ -1130,15 +1156,21 @@ impl MiniCompositor {
     }
 }
 
+fn infer_shm_dims(len: usize) -> Option<(u32, u32)> {
+    if len >= 800 * 600 * 4 {
+        Some((800, 600))
+    } else if len >= MIN_FRAME && len % (64 * 4) == 0 {
+        Some((64, (len / (64 * 4)) as u32))
+    } else {
+        None
+    }
+}
+
 fn frame_from_shm_file(file: &[u8]) -> Result<Option<ImportedFrame>, RelayError> {
     if !file.iter().any(|byte| *byte != 0) {
         return Ok(None);
     }
-    let (width, height) = if file.len() >= 800 * 600 * 4 {
-        (800u32, 600u32)
-    } else if file.len() >= MIN_FRAME && file.len() % (64 * 4) == 0 {
-        (64u32, (file.len() / (64 * 4)) as u32)
-    } else {
+    let Some((width, height)) = infer_shm_dims(file.len()) else {
         return Ok(None);
     };
     let needed = height as usize * width as usize * 4;
@@ -1468,6 +1500,33 @@ mod tests {
             compositor.take_frame().is_none(),
             "must not publish SHM frames before create_buffer"
         );
+    }
+
+    #[test]
+    fn attach_synthesizes_buffer_from_last_file_after_diff() {
+        let file = vec![0x33u8; 64 * 64 * 4];
+        let mut compositor = MiniCompositor::new();
+        compositor.objects.insert(13, Object::Surface);
+        compositor.surfaces.insert(13, Surface { buffer: None });
+        compositor.refresh_pool(&file);
+        assert!(compositor.take_frame().is_none());
+        // attach buffer=18 with no prior create_buffer
+        let mut args = Vec::new();
+        args.extend_from_slice(&18u32.to_le_bytes());
+        args.extend_from_slice(&0i32.to_le_bytes());
+        args.extend_from_slice(&0i32.to_le_bytes());
+        compositor.dispatch(13, 1, &args).unwrap();
+        assert!(compositor.buffers.contains_key(&18));
+        compositor.dispatch(13, 6, &[]).unwrap(); // commit
+        let frame = compositor.take_frame().expect("synthesized import");
+        assert_eq!((frame.width, frame.height), (64, 64));
+        let replies = compositor.drain_protocol();
+        let release = replies.iter().any(|msg| {
+            msg.len() >= 8
+                && u32::from_le_bytes(msg[0..4].try_into().unwrap()) == 18
+                && (u32::from_le_bytes(msg[4..8].try_into().unwrap()) & 0xffff) == 0
+        });
+        assert!(release, "synthesized attach+commit must release");
     }
 
     #[test]

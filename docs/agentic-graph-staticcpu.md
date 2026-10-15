@@ -1774,3 +1774,16 @@ arrives **after** DIFF; without catch-up import/release the guest stays in
 (catch-up). `commit_surface` releases even when buffer id missing from map.
 **Next:** commit Relay → rebuild tip → prove AUTH+800x600 Metal.
 **Human gate:** N16 unchanged. Completely complete still **0%**.
+
+## Tick 64 — 2026-10-15 ~03:25 PDT
+
+**Event:** catch-up tip (`201a442`) on `63A4C4D6`: **AUTH_OK=1**, **held=0**
+(first time held cleared). SHM: attach buffer=18 + commit loop, but **no**
+`create_buffer` log and **no** imported frames (release without pixels).
+**Root cause 5:** attach references buffer id never registered in MiniCompositor
+(create_buffer not parsed). Release-on-missing-buffer unblocked guest; import
+still starved.
+**Fix:** on attach, synthesize buffer+pool from `last_file` dims when id
+missing. Unit `attach_synthesizes_buffer_from_last_file_after_diff` green.
+**Next:** rebuild tip; prove imported 800x600 + Metal screenshot.
+**Human gate:** N16 unchanged. Completely complete still **0%**.
