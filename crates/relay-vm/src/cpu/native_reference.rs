@@ -1091,7 +1091,7 @@ fn reserved_simd_arithmetic_encodings_fail_without_mutation() {
         0x0c40_0c20,
         0x0f40_5402, // Q=0 vector immediate shifts cannot use D lanes.
         0x5f20_5402, // Scalar immediate shifts require D lanes.
-        0x1f40_5402, // Scalar encoding requires Q=1.
+        0x3f40_5402, // Scalar encoding requires Q=1.
         0x4f40_4402, // SRI requires U=1.
         0x0d40_4420, // Halfword lane transfer requires size[0]=0.
         0x0d40_8820, // Word/doubleword transfer requires size[1]=0.

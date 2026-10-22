@@ -84,7 +84,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::{
     fs::OpenOptions,
     os::unix::ffi::OsStrExt,
@@ -96,7 +96,6 @@ use std::{
 pub const WAYPIPE_VSOCK_PORT: u32 = 1024;
 
 /// Virtiofs tag for OCI runtime bundles shared into the guest.
-#[cfg(target_os = "macos")]
 pub const OCI_SHARE_TAG: &str = "oci-bundle";
 
 /// Kernel cmdline token that arms the guest baked-slim OCI bind path.
@@ -242,6 +241,20 @@ static VZ_SESSIONS: OnceLock<Mutex<BTreeMap<String, VzSession>>> = OnceLock::new
 
 #[cfg(target_os = "macos")]
 struct VzSession {
+    _disk_guard: std::fs::File,
+    child: Child,
+    machine_id: String,
+    endpoint: PathBuf,
+    log_path: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+static KVM_SESSIONS: OnceLock<Mutex<BTreeMap<String, KvmSession>>> = OnceLock::new();
+#[cfg(target_os = "linux")]
+static NEXT_KVM_SESSION: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "linux")]
+struct KvmSession {
     _disk_guard: std::fs::File,
     child: Child,
     machine_id: String,
@@ -725,23 +738,29 @@ fn start_vz(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
     if spec.kind == RelayKind::Wasm {
         return Err(RelayError::Failed("vz is a VM backend".into()));
     }
-    #[cfg(target_os = "macos")]
-    {
-        return start_vz_macos(spec);
-    }
-    #[cfg(not(target_os = "macos"))]
-    Err(RelayError::Failed(
-        "Virtualization.framework is available only on macOS".into(),
-    ))
-}
-
-#[cfg(target_os = "macos")]
-fn start_vz_macos(spec: &RelaySpec) -> Result<RelayHandle, RelayError> {
     let resources = spec
         .resources
         .as_ref()
         .ok_or_else(|| RelayError::Failed("Relay VZ runtime resources are missing".into()))?;
-    validate_resources(resources)?;
+    #[cfg(target_os = "macos")]
+    {
+        validate_resources(resources)?;
+        return start_vz_macos(spec, resources);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = resources;
+        Err(RelayError::Failed(
+            "Virtualization.framework is available only on macOS".into(),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_vz_macos(
+    spec: &RelaySpec,
+    resources: &relay_core::RelayRuntimeResources,
+) -> Result<RelayHandle, RelayError> {
     let source_manifest = spec
         .guest
         .as_ref()
@@ -977,7 +996,6 @@ fn resolve_artifact(
     Ok(artifact)
 }
 
-#[cfg(target_os = "macos")]
 fn wait_for_guest_ready(
     child: &mut Child,
     log_path: &Path,
@@ -986,10 +1004,10 @@ fn wait_for_guest_ready(
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait().map_err(|error| {
-            RelayError::Failed(format!("cannot inspect Relay VZ process: {error}"))
+            RelayError::Failed(format!("cannot inspect Relay VM process: {error}"))
         })? {
             return Err(RelayError::Failed(format!(
-                "Relay VZ launcher exited before guest readiness: {status}\n{}",
+                "Relay VM launcher exited before guest readiness: {status}\n{}",
                 recent_log(log_path)
             )));
         }
@@ -999,7 +1017,7 @@ fn wait_for_guest_ready(
         }
         if started.elapsed() >= timeout {
             return Err(RelayError::Failed(format!(
-                "Relay VZ guest readiness timed out\n{}",
+                "Relay VM guest readiness timed out\n{}",
                 recent_log(log_path)
             )));
         }
@@ -1007,23 +1025,239 @@ fn wait_for_guest_ready(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn recent_log(log_path: &Path) -> String {
     let bytes = fs::read(log_path).unwrap_or_default();
     let start = bytes.len().saturating_sub(16 * 1024);
     String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
-fn start_kvm(_spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, RelayError> {
+#[cfg(target_os = "linux")]
+fn recover_stale_kvm_session(machine_id: &str) -> Result<(), RelayError> {
+    let sessions = KVM_SESSIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut sessions = sessions
+        .lock()
+        .map_err(|_| RelayError::Failed("Relay KVM session registry is poisoned".into()))?;
+    let existing = sessions
+        .iter_mut()
+        .find(|(_, session)| session.machine_id == machine_id)
+        .map(|(id, session)| (id.clone(), session.child.try_wait()));
+    match existing {
+        Some((_, Ok(None))) => Err(RelayError::Failed(
+            "Relay machine is already running".into(),
+        )),
+        Some((id, Ok(Some(_)))) => {
+            if let Some(session) = sessions.remove(&id) {
+                let _ = fs::remove_file(session.endpoint);
+            }
+            Ok(())
+        }
+        Some((_, Err(error))) => Err(RelayError::Failed(format!(
+            "cannot inspect existing Relay VM: {error}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_kvm_resources(resources: &relay_core::RelayRuntimeResources) -> Result<(), RelayError> {
+    if resources.state_directory.is_empty() || resources.state_directory.contains('\0') {
+        return Err(RelayError::Failed(
+            "Relay KVM runtime resources contain an invalid path".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn find_kvm_launcher(
+    resources: &relay_core::RelayRuntimeResources,
+    backend: RelayBackend,
+) -> Result<PathBuf, RelayError> {
+    if !resources.launcher.is_empty() && Path::new(&resources.launcher).is_file() {
+        return Ok(PathBuf::from(&resources.launcher));
+    }
+    if let Some(path) = std::env::var_os("WAWONA_VM_LAUNCH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    let binary_name = match backend {
+        RelayBackend::KvmCrosvm => "crosvm",
+        _ => "cloud-hypervisor",
+    };
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(binary_name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+            let wrapper = dir.join("wawona-vm-launch");
+            if wrapper.is_file() {
+                return Ok(wrapper);
+            }
+        }
+    }
+    Err(RelayError::Planned(
+        "Relay KVM launcher (cloud-hypervisor, crosvm, or wawona-vm-launch) not found on PATH or WAWONA_VM_LAUNCH",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn start_kvm(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, RelayError> {
     if !std::path::Path::new("/dev/kvm").exists() {
         return Err(RelayError::Failed(
             "/dev/kvm missing. Fail closed. No QEMU TCG".into(),
         ));
     }
-    let _ = backend;
-    Err(RelayError::Planned(
-        "Relay KVM launch is not implemented yet; no VM was started",
-    ))
+    let resources = spec
+        .resources
+        .as_ref()
+        .ok_or_else(|| RelayError::Failed("Relay KVM runtime resources are missing".into()))?;
+    validate_kvm_resources(resources)?;
+    let source_manifest = spec
+        .guest
+        .as_ref()
+        .ok_or_else(|| RelayError::Failed("Relay KVM requires a guest manifest".into()))?;
+    source_manifest.verify_trust(
+        &resources.trusted_guest_keys,
+        resources.allow_unsigned_guest,
+    )?;
+    let mut manifest = resolved_manifest(source_manifest, resources.guest_directory.as_deref())?;
+    manifest.memory_bytes = spec.vm_memory_bytes(manifest.memory_bytes)?;
+    let (disk_gib, quota) = spec.vm_disk_limits()?;
+    guest::validate_artifacts(&manifest)?;
+    let initrd = manifest
+        .initrd
+        .as_ref()
+        .ok_or_else(|| RelayError::Failed("Relay KVM requires a guest initrd".into()))?;
+    let machine_id = machine_state_key(spec.machine_id.as_deref())?;
+    recover_stale_kvm_session(&machine_id)?;
+
+    let id = format!(
+        "relay-kvm-{}-{}",
+        std::process::id(),
+        NEXT_KVM_SESSION.fetch_add(1, Ordering::Relaxed)
+    );
+    let session_directory = Path::new(&resources.state_directory)
+        .join("machines")
+        .join(&machine_id);
+    fs::create_dir_all(&session_directory).map_err(|error| {
+        RelayError::Failed(format!("cannot create VM state directory: {error}"))
+    })?;
+    let disk = session_directory.join("rootfs.img");
+    let mut disk_guard = storage::open(Path::new(&manifest.rootfs.path), &disk, disk_gib, quota)?;
+    if let Some(generation) = spec.nixos_generation {
+        nixos_generations::activate_generation(&mut disk_guard, generation)?;
+    }
+    let endpoint = session_directory.join("wayland.sock");
+    if endpoint.as_os_str().as_bytes().len() >= 100 {
+        return Err(RelayError::Failed(
+            "Relay Wayland endpoint exceeds the Unix socket path limit".into(),
+        ));
+    }
+    let log_path = session_directory.join("console.log");
+    let _ = fs::remove_file(&endpoint);
+    let log = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_path)
+        .map_err(|error| RelayError::Failed(format!("cannot open VM log: {error}")))?;
+    let stderr = log.try_clone().map_err(|error| {
+        RelayError::Failed(format!("cannot duplicate VM log descriptor: {error}"))
+    })?;
+
+    let memory_mib = manifest.memory_bytes / (1024 * 1024);
+    let vsock_socket = session_directory.join("vsock.sock");
+    let _ = fs::remove_file(&vsock_socket);
+
+    let launcher_bin = find_kvm_launcher(resources, backend)?;
+    let mut command = Command::new(&launcher_bin);
+    if launcher_bin.file_name().map_or(false, |n| n == "cloud-hypervisor") {
+        command
+            .arg("--kernel")
+            .arg(&manifest.kernel.path)
+            .arg("--initramfs")
+            .arg(&initrd.path)
+            .arg("--disk")
+            .arg(format!("path={}", disk.display()))
+            .arg("--cmdline")
+            .arg(&manifest.command_line)
+            .arg("--memory")
+            .arg(format!("size={}M", memory_mib))
+            .arg("--vsock")
+            .arg(format!("cid=3,socket={}", vsock_socket.display()));
+        if spec.kind == RelayKind::Container {
+            if let Some(bundle) = spec.image.as_deref() {
+                command.arg("--fs").arg(format!("tag=oci-bundle,socket={}", session_directory.join("virtiofs.sock").display()));
+            }
+        }
+    } else {
+        command
+            .arg("--kernel")
+            .arg(&manifest.kernel.path)
+            .arg("--initrd")
+            .arg(&initrd.path)
+            .arg("--disk")
+            .arg(&disk)
+            .arg("--cmdline")
+            .arg(&manifest.command_line)
+            .arg("--memory-mib")
+            .arg(memory_mib.to_string())
+            .arg("--vsock-connect")
+            .arg(WAYPIPE_VSOCK_PORT.to_string())
+            .arg("--listen-unix")
+            .arg(&endpoint);
+        if spec.kind == RelayKind::Container {
+            if let Some(bundle) = spec.image.as_deref() {
+                command.arg("--share-dir").arg(bundle).arg("--share-tag").arg(OCI_SHARE_TAG);
+            }
+        }
+    }
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| RelayError::Failed(format!("cannot start Relay KVM launcher: {error}")))?;
+
+    if let Err(error) = wait_for_guest_ready(&mut child, &log_path, Duration::from_secs(90)) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    let sessions = KVM_SESSIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    sessions
+        .lock()
+        .map_err(|_| RelayError::Failed("Relay KVM session registry is poisoned".into()))?
+        .insert(
+            id.clone(),
+            KvmSession {
+                _disk_guard: disk_guard,
+                child,
+                machine_id,
+                endpoint: endpoint.clone(),
+                log_path,
+            },
+        );
+
+    Ok(RelayHandle {
+        id,
+        backend,
+        kind: spec.kind,
+        wayland_endpoint: Some(endpoint.display().to_string()),
+        frame: None,
+        frame_width: 0,
+        frame_height: 0,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_kvm(_spec: &RelaySpec, _backend: RelayBackend) -> Result<RelayHandle, RelayError> {
+    Err(RelayError::Failed("KVM is available only on Linux".into()))
 }
 
 pub fn stop(handle: &str) -> Result<(), RelayError> {
@@ -1088,7 +1322,21 @@ pub fn stop(handle: &str) -> Result<(), RelayError> {
         let _ = fs::remove_file(session.endpoint);
         return Ok(());
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(sessions) = KVM_SESSIONS.get() {
+            let mut sessions = sessions
+                .lock()
+                .map_err(|_| RelayError::Failed("Relay KVM session registry is poisoned".into()))?;
+            if let Some(mut session) = sessions.remove(handle) {
+                terminate_child(&mut session.child)?;
+                let _ = fs::remove_file(session.endpoint);
+                return Ok(());
+            }
+        }
+        return Err(RelayError::Failed("Relay VM handle is not running".into()));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = handle;
         Ok(())
@@ -1132,7 +1380,30 @@ pub fn status(handle: &str) -> Result<RelayVmStatus, RelayError> {
             })
             .map_err(|error| RelayError::Failed(format!("cannot inspect Relay VM: {error}")));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let sessions = KVM_SESSIONS
+            .get()
+            .ok_or_else(|| RelayError::Failed("Relay VM handle is not running".into()))?;
+        let mut sessions = sessions
+            .lock()
+            .map_err(|_| RelayError::Failed("Relay KVM session registry is poisoned".into()))?;
+        let session = sessions
+            .get_mut(handle)
+            .ok_or_else(|| RelayError::Failed("Relay VM handle is not running".into()))?;
+        return session
+            .child
+            .try_wait()
+            .map(|status| {
+                if status.is_some() {
+                    RelayVmStatus::Exited
+                } else {
+                    RelayVmStatus::Running
+                }
+            })
+            .map_err(|error| RelayError::Failed(format!("cannot inspect Relay VM: {error}")));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = handle;
         Err(RelayError::Planned(
@@ -1341,7 +1612,21 @@ pub fn console_log(handle: &str) -> Result<Vec<u8>, RelayError> {
         return fs::read(&session.log_path)
             .map_err(|error| RelayError::Failed(format!("cannot read Relay VM log: {error}")));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let sessions = KVM_SESSIONS
+            .get()
+            .ok_or_else(|| RelayError::Failed("Relay VM handle is not running".into()))?;
+        let sessions = sessions
+            .lock()
+            .map_err(|_| RelayError::Failed("Relay KVM session registry is poisoned".into()))?;
+        let session = sessions
+            .get(handle)
+            .ok_or_else(|| RelayError::Failed("Relay VM handle is not running".into()))?;
+        return fs::read(&session.log_path)
+            .map_err(|error| RelayError::Failed(format!("cannot read Relay VM log: {error}")));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = handle;
         Err(RelayError::Planned(
@@ -1474,7 +1759,7 @@ pub fn static_device_progress(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn terminate_child(child: &mut Child) -> Result<(), RelayError> {
     unsafe extern "C" {
         fn kill(pid: i32, signal: i32) -> i32;

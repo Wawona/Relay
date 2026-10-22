@@ -3570,7 +3570,7 @@ impl StaticCpu {
             }
         }
         // Scalar S/D FMAX, FMIN, FMAXNM, FMINNM, and FNMUL.
-        if matches!(insn & 0xff20_c000, 0x1e20_4000 | 0x1e20_8000) {
+        if matches!(insn & 0xffa0_c000, 0x1e20_4000 | 0x1e20_8000) {
             let kind = (insn >> 12) & 15;
             if matches!(kind, 4 | 5 | 6 | 7 | 8) {
                 let double = insn & (1 << 22) != 0;
@@ -4955,6 +4955,9 @@ fn simd_by_element(
         }
         9 if size >= 2 => {
             if unsigned {
+                if size != 2 {
+                    return None;
+                }
                 let packed = u32::from(size == 3);
                 simd_three_same(vn, broadcast, vd, wide, false, packed, 0x1b, scalar, fpcr)
             } else {
