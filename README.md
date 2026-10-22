@@ -15,7 +15,7 @@ Flake input name: **`wwn-relay`** (`github:Wawona/Relay/development`).
 | Host | VM | Container | Wasm |
 |------|----|-----------|------|
 | macOS Apple silicon | `Virtualization.framework` | Apple Containerization (OCI on VZ Linux VMs) | Wasmtime Cranelift |
-| Linux AppImage | KVM via cloud-hypervisor or crosvm. Fail closed without `/dev/kvm` | OCI-in-that-KVM-VM | Cranelift |
+| Linux AppImage / host | KVM via cloud-hypervisor over `/dev/kvm`. Fail closed without `/dev/kvm`. Reuses host VMM | OCI-in-that-KVM-VM via the same host cloud-hypervisor binary (zero duplicate hypervisors) | Cranelift / wasm CLI (`wpm` packages) |
 | iOS / iPadOS Mode A | Relay static CPU (jitless AArch64) | OCI on that VM | Pulley through OS 26. OS 27+: Wasmer WASIX in a hidden WKWebView when WasmerSDK is linked |
 | iOS / iPadOS Mode B (tipa / Sileo) | Same CPU plus JIT when MAP_JIT write+exec works | OCI on that VM | Same bytecode. Pulley until MAP_JIT |
 | Android Play / sideload Mode A | Relay static CPU. No AVF | OCI-in-VM (virtiofs `oci-bundle` + guest crun). No proot | Pulley |
@@ -78,8 +78,11 @@ launcher.
   macOS, Linux, and Android Mode B. Bare `/wasm/v1` package names resolve
   through the local `wpm` PackageStore (`wpm install` first). Registry fetch
   stays in the `wpm` CLI.
-- Linux KVM starts fail closed until their real launch adapters exist. Relay
-  never returns a success-shaped VM handle from a placeholder.
+- Linux KVM: real launch adapter implemented in `relay-vm` (`KvmLauncher`).
+  Reuses a single host `cloud-hypervisor` binary over `/dev/kvm` across both
+  `virtual_machine` (NixOS guest) and `container` (OCI) workloads, eliminating
+  duplicate hypervisor backends and avoiding custom runtime maintenance. Fails
+  closed if `/dev/kvm` is absent. Never QEMU.
 
 ## Mode A speed (live)
 

@@ -10,3 +10,4 @@ relay-vm-state*
 /fuzz/corpus
 /fuzz/target
 verification/loom-lifecycle/target/
+.ccache/
