@@ -109,6 +109,25 @@ fn resolve_wasm_path(path: &Path) -> Result<std::path::PathBuf> {
     }
     // Package names are bare identifiers (no slash).
     if path.components().count() == 1 {
+        let base_name = name.strip_suffix(".wasm").unwrap_or(name);
+        if base_name == "hello-wasi-gui" || base_name == "wasi-hello-gui" {
+            let tmp = std::env::temp_dir().join("wawona-hello-wasi-gui.wasm");
+            if tmp.is_file() {
+                return Ok(tmp);
+            }
+            let repo_res = Path::new("/home/alex/Wawona/Wawona/src/resources/wasm/hello-wasi-gui.wasm");
+            if repo_res.is_file() {
+                return Ok(repo_res.to_path_buf());
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let mod_path = Path::new(&home)
+                .join(".local/share/Wawona/wasm-modules")
+                .join(format!("{base_name}.wasm"));
+            if mod_path.is_file() {
+                return Ok(mod_path);
+            }
+        }
         if let Ok(store) = wpm::PackageStore::open_default() {
             if let Ok(p) = store.resolve_wasm(name) {
                 return Ok(p);
