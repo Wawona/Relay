@@ -11,7 +11,7 @@
 #   * `writableStoreOverlay` + a virtiofs read-only share of the host /nix/store
 #     means the rootfs is a tiny writable overlay disk — NO `make-disk-image`,
 #     so NO nested QEMU/KVM VM is needed to build it (that is what stalled the
-#     make-ext4-fs guest on the VZ Linux builder). The guest closure is realized
+#     make-btrfs-fs guest on the VZ Linux builder). The guest closure is realized
 #     by the aarch64-linux builder and shared straight into the VM.
 #   * vsock plumbing, Rosetta, virtiofs shares and NAT networking are all handled
 #     by the microvm module.

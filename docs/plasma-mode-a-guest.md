@@ -11,7 +11,7 @@ ships inside the IPA.
 |-------|--------|
 | Engine | Relay `StaticCpu` (Mode A) / VZ (macOS) / KVM (Linux) |
 | Guest GUI pipe | `waypipe --no-gpu --vsock` → host SHM importer → `IlandPresentEngine` |
-| Tip guest session (until full Plasma image lands) | **KWin QPainter** + foot. Built tip artifact `/tmp/wawona-nixos-guest-4k-plasma` (rootfs 4.1G, `memory_bytes` 2GiB). Full `startplasma-wayland` blocked by builder TMPDIR (~2× closure) |
+| Tip guest session (until full Plasma image lands) | **KWin QPainter** + foot. Root is **btrfs** (`make-btrfs-fs --shrink`; `wawona-grow-root` → `btrfs filesystem resize max /`). Tip artifact `/tmp/wawona-nixos-guest-4k-btrfs` (rootfs 5.7G, magic `_BHRfS_M`, `rootfstype=btrfs`). Full `startplasma-wayland` blocked by builder TMPDIR (~2× closure) |
 | Closure budgets (aarch64) | plasma6.enable ≈ 7 GiB; plasma-workspace curated ≈ 4.1 GiB; **kwin ≈ 2.0 GiB** (fits Determinated builder) |
 | `machine-kde` card | Same guest tree; notes say Plasma; tip embeds KWin session until Plasma fits |
 | Terminal in-place (`\r` / ESC M / CSI K) | Landed `Terminal` `0158344` (`wrap_cont`). Host FitTerminal floors cols at 80. Tip backend rebuilt |

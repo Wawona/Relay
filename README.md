@@ -175,7 +175,8 @@ The NixOS guest derivations use Linux 7.2 or newer and emit `Image`, `initrd`,
 `rootfs.img`, `cmdline`, and `manifest.json`. They build on Determinate's native aarch64-linux builder
 even when the macOS Nix store is case-insensitive. The guest uses a minimal
 scripted initrd with no case-colliding terminfo data. Rootfs construction
-removes Nix case-hack suffixes inside the ext4 image and validates the result.
+renames Nix case-hack suffixes in the rootImage tree before mkfs.btrfs and
+validates the result.
 The 16 KiB guest builds a real `CONFIG_ARM64_16K_PAGES=y` Linux 7.2 kernel from
 the NixOS config (ACPI/PCI for Apple VZ), with unused trees and loadable
 modules trimmed so the builder scratch disk does not fill. Both 4 KiB and

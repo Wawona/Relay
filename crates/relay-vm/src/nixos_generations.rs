@@ -18,6 +18,11 @@ use std::{
 
 const SUPERBLOCK_OFFSET: u64 = 1024;
 const EXT4_MAGIC: u16 = 0xEF53;
+/// btrfs superblock magic lives at 0x10040 (`_BHRfS_M`).
+const BTRFS_MAGIC_OFFSET: u64 = 0x10040;
+const BTRFS_MAGIC: &[u8; 8] = b"_BHRfS_M";
+const BTRFS_GENERATIONS_MSG: &str =
+    "NixOS generation switch on btrfs guest disks is not implemented yet";
 const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
 const INCOMPAT_FILETYPE: u32 = 0x2;
 const INCOMPAT_RECOVER: u32 = 0x4;
@@ -70,6 +75,7 @@ pub fn activate_generation(file: &mut File, generation: u32) -> Result<(), Relay
             "NixOS generation numbers start at 1".into(),
         ));
     }
+    reject_btrfs_generations(file)?;
     let mut fs = Ext4::open(file)?;
     if fs.superblock.incompat & INCOMPAT_RECOVER != 0 {
         return Err(RelayError::Failed(
@@ -102,7 +108,30 @@ pub fn activate_generation(file: &mut File, generation: u32) -> Result<(), Relay
     fs.write_inode(system_ino, &inode)
 }
 
+fn reject_btrfs_generations(file: &mut File) -> Result<(), RelayError> {
+    let mut magic = [0u8; 8];
+    match file.seek(SeekFrom::Start(BTRFS_MAGIC_OFFSET)) {
+        Err(error) => {
+            return Err(RelayError::Failed(format!(
+                "cannot probe NixOS disk filesystem: {error}"
+            )));
+        }
+        Ok(_) => {}
+    }
+    match file.read(&mut magic) {
+        // Synthetic / truncated fixtures may be shorter than the btrfs
+        // superblock offset. Treat a short read as "not btrfs".
+        Ok(n) if n < magic.len() => Ok(()),
+        Ok(_) if &magic == BTRFS_MAGIC => Err(RelayError::Failed(BTRFS_GENERATIONS_MSG.into())),
+        Ok(_) => Ok(()),
+        Err(error) => Err(RelayError::Failed(format!(
+            "cannot probe NixOS disk filesystem: {error}"
+        ))),
+    }
+}
+
 fn list_file(file: &mut File) -> Result<Vec<NixGeneration>, RelayError> {
+    reject_btrfs_generations(file)?;
     let mut fs = Ext4::open(file)?;
     let Ok(profiles) = walk_profile(&mut fs) else {
         return Ok(Vec::new());
@@ -579,6 +608,27 @@ mod tests {
             serde_json::from_str(&generations_json(&path).unwrap()).unwrap();
         assert_eq!(json["generations"][1]["current"], true);
         assert_eq!(json["generations"][0]["current"], false);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn btrfs_disk_rejects_generation_ops() {
+        let path =
+            std::env::temp_dir().join(format!("relay-generations-btrfs-{}", std::process::id()));
+        let mut bytes = vec![0u8; (BTRFS_MAGIC_OFFSET as usize) + BTRFS_MAGIC.len()];
+        bytes[BTRFS_MAGIC_OFFSET as usize..].copy_from_slice(BTRFS_MAGIC);
+        File::create(&path).unwrap().write_all(&bytes).unwrap();
+        let list_err = generations_json(&path).unwrap_err();
+        assert!(
+            list_err.to_string().contains("btrfs"),
+            "list error: {list_err}"
+        );
+        let mut file = File::options().read(true).write(true).open(&path).unwrap();
+        let activate_err = activate_generation(&mut file, 1).unwrap_err();
+        assert!(
+            activate_err.to_string().contains("btrfs"),
+            "activate error: {activate_err}"
+        );
         let _ = std::fs::remove_file(path);
     }
 

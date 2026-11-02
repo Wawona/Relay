@@ -1,8 +1,10 @@
-# Kernel + initrd + ext4 rootfs artifacts for Relay's static AArch64 guest.
+# Kernel + initrd + btrfs rootfs artifacts for Relay's static AArch64 guest.
 #
 # Builds on aarch64-linux, including Determinate's native Linux builder on a
 # case-insensitive macOS store. Stage 1 excludes case-colliding terminfo data.
-# The ext4 image is fixed in place so Nix case-hack names never reach Linux.
+# Case-hack names are renamed in the rootImage tree before mkfs.btrfs -r, so
+# they never reach the Linux guest. make-btrfs-fs --shrink sizes the image to
+# contents; wawona-grow-root expands it to the virtio disk at boot.
 # The engine passes these artifacts as bundled / ODR data into the iOS app
 # (never downloaded code).
 {
@@ -16,7 +18,7 @@ let
   kernel = cfg.system.build.kernel;
   initrd = cfg.system.build.initialRamdisk;
   toplevel = cfg.system.build.toplevel;
-  rawRootfs = pkgs.callPackage (pkgs.path + "/nixos/lib/make-ext4-fs.nix") {
+  rawRootfs = pkgs.callPackage (pkgs.path + "/nixos/lib/make-btrfs-fs.nix") {
     storePaths = [ toplevel ];
     volumeLabel = "nixos";
     populateImageCommands = ''
@@ -32,41 +34,52 @@ let
     '';
   };
   rootfs = rawRootfs.overrideAttrs (old: {
-    buildCommand = old.buildCommand + ''
-      # A case-insensitive Darwin store represents colliding Linux names with
-      # ~nix~case~hack~N suffixes. Rename those directory entries inside the
-      # case-sensitive ext4 image without first materializing them on the host.
-      commands=debugfs-case-unhack.commands
-      errors=debugfs-case-unhack.errors
-      : > "$commands"
+    # Unhack Nix case-colliding names while rootImage is still a
+    # case-sensitive directory tree (Linux builder TMPDIR). btrfs has no
+    # debugfs; rename before mkfs.btrfs -r. Needle matches make-btrfs-fs
+    # after Nix strips the common indent from its indented string.
+    buildCommand =
+      let
+        needle = ''touch $img
+faketime -f "1970-01-01 00:00:01" fakeroot mkfs.btrfs'';
+        # Close the indented string immediately after mkfs.btrfs so the
+        # original `-L … -U … -r … --shrink $img` suffix stays on the same
+        # shell line (a trailing newline would make mkfs.btrfs run with no
+        # device and print usage).
+        insert = ''
+          # Store copies are mode 444/555. Make the staging tree writable
+          # before renaming case-hack entries.
+          chmod -R u+w ./rootImage
+          while IFS= read -r -d "" physical; do
+            relative="''${physical#./rootImage}"
+            directory="$(dirname "$relative")"
+            basename="$(basename "$relative")"
+            if [[ "$basename" =~ ^(.*)~nix~case~hack~[0-9]+$ ]]; then
+              logicalDirectory="$(
+                printf '%s' "$directory" |
+                  sed -E 's/~nix~case~hack~[0-9]+//g'
+              )"
+              logicalBasename="''${BASH_REMATCH[1]}"
+              mkdir -p "./rootImage$logicalDirectory"
+              # Target may already exist when both case forms were copied
+              # (case-sensitive TMPDIR). Prefer the unhacked name.
+              if [ -e "./rootImage$logicalDirectory/$logicalBasename" ]; then
+                rm -rf "./rootImage$directory/$basename"
+              else
+                mv -n "./rootImage$directory/$basename" \
+                  "./rootImage$logicalDirectory/$logicalBasename"
+              fi
+            fi
+          done < <(find ./rootImage -depth -name '*~nix~case~hack~[0-9]*' -print0)
 
-      while IFS= read -r -d "" physical; do
-        relative="''${physical#./rootImage}"
-        directory="$(dirname "$relative")"
-        basename="$(basename "$relative")"
-        if [[ "$basename" =~ ^(.*)~nix~case~hack~[0-9]+$ ]]; then
-          logicalDirectory="$(
-            printf '%s' "$directory" |
-              sed -E 's/~nix~case~hack~[0-9]+//g'
-          )"
-          logicalBasename="''${BASH_REMATCH[1]}"
-          sourcePath="$logicalDirectory/$basename"
-          targetPath="$logicalDirectory/$logicalBasename"
-          printf 'ln "%s" "%s"\nunlink "%s"\n' \
-            "$sourcePath" "$targetPath" "$sourcePath" >> "$commands"
-        fi
-      done < <(find ./rootImage -name '*~nix~case~hack~[0-9]*' -print0)
-
-      if [ -s "$commands" ]; then
-        faketime -f "1970-01-01 00:00:01" \
-          debugfs -w -f "$commands" "$out" 2> "$errors"
-        if grep -Ev '^debugfs [0-9]' "$errors"; then
-          echo "Failed to remove Nix case-hack names from rootfs" >&2
-          exit 1
-        fi
-        e2fsck -fn "$out"
-      fi
-    '';
+          touch $img
+          faketime -f "1970-01-01 00:00:01" fakeroot mkfs.btrfs'';
+        replaced = builtins.replaceStrings [ needle ] [ insert ] old.buildCommand;
+      in
+      if replaced == old.buildCommand then
+        throw "guest-artifacts: failed to inject btrfs case-unhack before mkfs.btrfs"
+      else
+        replaced;
   });
   # Direct Image boot does not pass through a NixOS bootloader. Reuse the
   # guest module's kernel parameters so early console and diagnostic policy
@@ -76,7 +89,7 @@ let
     ++ cfg.boot.kernelParams
     ++ [
       "root=/dev/vda"
-      "rootfstype=ext4"
+      "rootfstype=btrfs"
       "rootwait"
       "rw"
     ]

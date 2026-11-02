@@ -92,8 +92,9 @@ let
   # net/dsa and vmlinux.o). Start from the NixOS config (ACPI/PCI boot
   # under Apple VZ), flip to 16 KiB pages, drop unused trees and DWARF,
   # disable OF (no DTB forest), then turn every leftover =m off and
-  # force Relay virtio/ext4/vsock builtins. Keep MODULES=y so NixOS
-  # initrd can read modules.builtin.
+  # force Relay virtio/btrfs/vsock builtins. Keep MODULES=y so NixOS
+  # initrd can read modules.builtin. Keep EXT4_FS so older ext4 guest
+  # disks still mount; new images are btrfs.
   config16k =
     (pkgs.linuxKernel.linuxConfig {
       inherit (baseKernel) src version;
@@ -149,6 +150,7 @@ let
             ${lib.concatStringsSep " " firewallBuiltins} \
             MODULES \
             EXT4_FS \
+            BTRFS_FS \
             VIRTIO \
             VIRTIO_PCI \
             VIRTIO_MMIO \
@@ -181,6 +183,7 @@ let
               ${lib.concatStringsSep " " firewallBuiltins} \
               MODULES \
               EXT4_FS \
+              BTRFS_FS \
               VIRTIO \
               VIRTIO_PCI \
               VIRTIO_MMIO \
@@ -231,6 +234,7 @@ let
           grep -qx 'CONFIG_ARM64_16K_PAGES=y' .config
           grep -qx 'CONFIG_MODULES=y' .config
           grep -qx 'CONFIG_EXT4_FS=y' .config
+          grep -qx 'CONFIG_BTRFS_FS=y' .config
           grep -qx 'CONFIG_VIRTIO_CONSOLE=y' .config
           grep -qx 'CONFIG_VIRTIO_VSOCKETS=y' .config
           grep -qx 'CONFIG_VIRTIO_FS=y' .config
@@ -389,7 +393,7 @@ in
     TTYPath = "/dev/hvc0";
     MaxLevelConsole = "info";
   };
-  # Relay CPU boots the ext4 rootfs off virtio-blk (/dev/vda). The
+  # Relay CPU boots the btrfs rootfs off virtio-blk (/dev/vda). The
   # engine passes the kernel + this rootfs directly (no bootloader).
   # Keep the real virtio transport loaded at sysinit as well as stage 1,
   # instead of relying on net-pf-40's VMCI alias.
@@ -404,23 +408,24 @@ in
     virtiofs = true;
     fuse = true;
     overlay = true;
-    # ext4.nix also adds ext2. Relay exposes only an ext4 root disk, and
-    # the case-insensitive VirtioFS builder cannot safely stage ext2.
+    btrfs = true;
+    # ext4.nix also adds ext2. Relay root is btrfs; drop ext2 staging.
     ext2 = lib.mkForce false;
   };
   fileSystems."/" = {
     device = "/dev/vda";
-    fsType = "ext4";
+    fsType = "btrfs";
     # Records the intent. Scripted stage 1 (boot.initrd.systemd.enable
     # is false) mounts this root before systemd, so the x-systemd.growfs
     # option this flag adds never runs. wawona-grow-root does the grow.
     autoResize = true;
   };
-  # Grow the mounted ext4 to the virtio-blk device after the host has
-  # lengthened the raw image. resize2fs is a no-op when the filesystem
-  # already fills the device. Existing files stay. Disks are grow-only.
+  # Grow the mounted btrfs to the virtio-blk device after the host has
+  # lengthened the raw image. `btrfs filesystem resize max /` is a no-op
+  # when the filesystem already fills the device. Existing files stay.
+  # Disks are grow-only.
   systemd.services.wawona-grow-root = {
-    description = "Grow the ext4 root to the virtio disk";
+    description = "Grow the btrfs root to the virtio disk";
     wantedBy = [ "local-fs.target" ];
     after = [ "systemd-remount-fs.service" ];
     before = [ "local-fs.target" ];
@@ -428,7 +433,7 @@ in
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStart = "${pkgs.e2fsprogs}/bin/resize2fs /dev/vda";
+      ExecStart = "${pkgs.btrfs-progs}/bin/btrfs filesystem resize max /";
     };
   };
   # Host Relay shares an OCI runtime bundle (config.json + rootfs/) with
@@ -888,7 +893,7 @@ PY
   # Parallel substitutes open many TLS flows; StaticCpu NAT then sees
   # SSL unexpected-EOF storms (auth48b). Keep substitute concurrency low.
   nix.settings.max-substitution-jobs = 2;
-  # make-ext4-fs writes /nix-path-registration, but unlike sd-image / LXC /
+  # make-btrfs-fs writes /nix-path-registration, but unlike sd-image / LXC /
   # docker-container this guest never loaded it. Store objects were on disk
   # while the nix DB was empty, so `nix run` re-downloaded the whole
   # closure over NAT (auth50). Load the DB before any nix command.

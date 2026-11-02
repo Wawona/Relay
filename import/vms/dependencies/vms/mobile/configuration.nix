@@ -8,9 +8,10 @@
 # - services.desktopManager.plasma6.enable → ~7 GiB closure
 # - curated plasma-workspace + kwin + breeze → ~4.1 GiB closure
 # - kwin alone → ~2.0 GiB closure
-# make-ext4-fs stages a full copy into builder TMPDIR (~2× closure). The
-# Determinated Linux builder overflows above ~3 GiB closure. Ship KWin first;
-# startplasma-wayland returns once the builder disk / ODR path lands.
+# make-btrfs-fs stages a full copy into builder TMPDIR (~2× closure), then
+# --shrink packs the image. wawona-grow-root expands to the virtio disk at
+# boot. Determinate Linux builder still overflows above ~3 GiB closure.
+# Ship KWin first; startplasma-wayland returns once builder disk / ODR lands.
 { pkgs, lib, ... }:
 {
   imports = [ ./relay.nix ];
