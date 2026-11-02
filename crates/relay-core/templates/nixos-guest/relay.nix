@@ -522,10 +522,10 @@ in
   # client has to stay enabled on both paths. Predictable names would
   # rename the MMIO device away from the ip=eth0 boot argument.
   networking.usePredictableInterfaceNames = false;
-  # Kernel ip= already stamps 10.0.2.15. dhcpcd still took the lease, then
-  # systemd TimeoutStartSec killed it and dhcpcd deleted the default route
-  # (4 KiB auth4: lease at 561s, SIGTERM at 581s, resolv.conf without a
-  # nameserver, getaddrinfo -2). Static IPv4 only. No dhcpcd.
+  # Kernel `ip=` is present on the command line but this guest kernel does
+  # not apply it (Unknown kernel command line parameters / no IP_PNP). Do
+  # not rely on it. dhcpcd was removed after it took a lease then lost the
+  # default route under TimeoutStartSec. Addressing is wawona-slirp-dns.
   networking.useDHCP = false;
   networking.dhcpcd.enable = false;
   # Default NixOS iptables-nft Firewall unit stalls StaticCpu for minutes
@@ -535,17 +535,14 @@ in
   # the unit off so sysinit does not pull it.
   networking.firewall.enable = lib.mkForce false;
   systemd.services.firewall.enable = lib.mkForce false;
-  networking.interfaces.eth0.ipv4.addresses = [
-    {
-      address = "10.0.2.15";
-      prefixLength = 24;
-    }
-  ];
-  networking.defaultGateway = {
-    address = "10.0.2.2";
-    interface = "eth0";
-  };
+  # Do not use networking.interfaces.eth0 / defaultGateway here. Those create
+  # sys-subsystem-net-devices-eth0.device with a 90s JobTimeoutSec; when
+  # virtio-net is late or absent on StaticCpu the guest burns ~3 minutes
+  # twice before Multi-User. vsock Wayland does not need eth0. Address and
+  # route are applied by wawona-slirp-dns below (|| true if eth0 missing).
   networking.nameservers = [ "10.0.2.3" ];
+  # If a future image still ships the device unit, fail fast.
+  systemd.services."network-addresses-eth0".enable = lib.mkForce false;
 
   # Software rendering only. Relay presents guest Wayland SHM through
   # Wawona's userspace display path; no guest GPU passthrough.

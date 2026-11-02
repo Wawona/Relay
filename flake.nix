@@ -183,9 +183,11 @@
             guestSystem = "aarch64-linux";
             pageSize = 4096;
           };
+          # Plasma 6 needs more than the old 1 GiB weston-smoke budget.
           mobileGuest4k = guestPkgs.callPackage ./import/vms/dependencies/vms/mobile/guest-artifacts.nix {
             mobileGuest = mobileGuest4kConfig;
             pageSize = 4096;
+            memoryBytes = 2147483648; # 2 GiB
           };
           mobileGuest16kConfig = import ./import/vms/dependencies/vms/mobile/guest.nix {
             inherit nixpkgs;

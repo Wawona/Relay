@@ -302,17 +302,31 @@ fn start_ios(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
             "static CPU is a guest-machine backend".into(),
         ));
     }
-    let manifest = spec.guest.as_ref().ok_or_else(|| {
-        RelayError::Failed("Relay VM/container start requires a guest manifest".into())
-    })?;
     let resources = spec
         .resources
         .as_ref()
         .ok_or_else(|| RelayError::Failed("Relay guest trust configuration is missing".into()))?;
-        manifest.verify_trust(
-            &resources.trusted_guest_keys,
-            resources.allow_unsigned_guest,
-        )?;
+    // Prefer the inlined guest object; otherwise load the App Store–bundled
+    // (or lab-staged) tree at resources.guest_directory/manifest.json.
+    let loaded = if spec.guest.is_some() {
+        None
+    } else {
+        Some(load_manifest_from_guest_directory(
+            resources.guest_directory.as_deref(),
+        )?)
+    };
+    let manifest = spec.guest.as_ref().or(loaded.as_ref()).ok_or_else(|| {
+        RelayError::Failed(
+            "Relay VM/container start requires a guest manifest \
+             (bundle wawona-nixos-guest-*/manifest.json in the app; \
+              do not download guest kernels)"
+                .into(),
+        )
+    })?;
+    manifest.verify_trust(
+        &resources.trusted_guest_keys,
+        resources.allow_unsigned_guest,
+    )?;
     let mut manifest = resolved_manifest(manifest, resources.guest_directory.as_deref())?;
     manifest.memory_bytes = spec.vm_memory_bytes(manifest.memory_bytes)?;
     let (disk_gib, quota) = spec.vm_disk_limits()?;
@@ -761,10 +775,19 @@ fn start_vz_macos(
     spec: &RelaySpec,
     resources: &relay_core::RelayRuntimeResources,
 ) -> Result<RelayHandle, RelayError> {
-    let source_manifest = spec
-        .guest
-        .as_ref()
-        .ok_or_else(|| RelayError::Failed("Relay VZ requires a guest manifest".into()))?;
+    let loaded = if spec.guest.is_some() {
+        None
+    } else {
+        Some(load_manifest_from_guest_directory(
+            resources.guest_directory.as_deref(),
+        )?)
+    };
+    let source_manifest = spec.guest.as_ref().or(loaded.as_ref()).ok_or_else(|| {
+        RelayError::Failed(
+            "Relay VZ requires a guest manifest              (bundle wawona-nixos-guest-*/manifest.json in the app)"
+                .into(),
+        )
+    })?;
     source_manifest.verify_trust(
         &resources.trusted_guest_keys,
         resources.allow_unsigned_guest,
@@ -952,6 +975,35 @@ fn validate_resources(resources: &RelayRuntimeResources) -> Result<(), RelayErro
     Ok(())
 }
 
+/// Read `manifest.json` from a bundled/staged guest tree. App Store builds
+/// ship this directory inside the `.app`; lab/TF may stage the same layout
+/// under Application Support. Never fetches over the network (Guideline 2.5.2).
+fn load_manifest_from_guest_directory(
+    guest_directory: Option<&str>,
+) -> Result<GuestManifest, RelayError> {
+    let root = guest_directory.ok_or_else(|| {
+        RelayError::Failed(
+            "Relay VM/container start requires a guest manifest \
+             (bundle wawona-nixos-guest-*/manifest.json in the app; \
+              do not download guest kernels)"
+                .into(),
+        )
+    })?;
+    let path = Path::new(root).join("manifest.json");
+    let bytes = fs::read(&path).map_err(|error| {
+        RelayError::Failed(format!(
+            "cannot read guest manifest at {}: {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        RelayError::Failed(format!(
+            "invalid guest manifest at {}: {error}",
+            path.display()
+        ))
+    })
+}
+
 fn resolved_manifest(
     manifest: &GuestManifest,
     guest_directory: Option<&str>,
@@ -1115,10 +1167,19 @@ fn start_kvm(spec: &RelaySpec, backend: RelayBackend) -> Result<RelayHandle, Rel
         .as_ref()
         .ok_or_else(|| RelayError::Failed("Relay KVM runtime resources are missing".into()))?;
     validate_kvm_resources(resources)?;
-    let source_manifest = spec
-        .guest
-        .as_ref()
-        .ok_or_else(|| RelayError::Failed("Relay KVM requires a guest manifest".into()))?;
+    let loaded = if spec.guest.is_some() {
+        None
+    } else {
+        Some(load_manifest_from_guest_directory(
+            resources.guest_directory.as_deref(),
+        )?)
+    };
+    let source_manifest = spec.guest.as_ref().or(loaded.as_ref()).ok_or_else(|| {
+        RelayError::Failed(
+            "Relay KVM requires a guest manifest              (bundle wawona-nixos-guest-*/manifest.json in the app)"
+                .into(),
+        )
+    })?;
     source_manifest.verify_trust(
         &resources.trusted_guest_keys,
         resources.allow_unsigned_guest,
@@ -1899,6 +1960,46 @@ mod tests {
         };
         let error = start(&spec).unwrap_err();
         assert!(error.to_string().contains("requires a guest manifest"));
+    }
+
+    #[test]
+    fn load_manifest_from_guest_directory_reads_bundled_tree() {
+        let dir = std::env::temp_dir().join(format!(
+            "relay-guest-manifest-{}-{}",
+            std::process::id(),
+            NEXT_VZ_SESSION.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let manifest = GuestManifest {
+            version: GuestManifest::VERSION,
+            page_size: 4096,
+            memory_bytes: 64 * 1024 * 1024,
+            kernel: GuestArtifact {
+                path: "Image".into(),
+                sha256: "00".repeat(32),
+                bytes: 1,
+            },
+            initrd: None,
+            rootfs: GuestArtifact {
+                path: "rootfs.img".into(),
+                sha256: "11".repeat(32),
+                bytes: 1,
+            },
+            command_line: "init=/init".into(),
+            compatibility: Default::default(),
+            signature: None,
+        };
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let loaded =
+            load_manifest_from_guest_directory(Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(loaded.version, GuestManifest::VERSION);
+        assert_eq!(loaded.kernel.path, "Image");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

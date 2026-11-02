@@ -121,6 +121,7 @@ pub fn build(
     prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
     prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_0000, 0, 0x1000]);
     prop_cells(&mut st, &mut strings, "interrupts", &[0, 32, 4]);
+    prop_empty(&mut st, &mut strings, "dma-coherent");
     end_node(&mut st);
 
     // Port zero is the guest's hvc0. Relay forwards its output to the host
@@ -129,12 +130,14 @@ pub fn build(
     prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
     prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_1000, 0, 0x1000]);
     prop_cells(&mut st, &mut strings, "interrupts", &[0, 34, 4]);
+    prop_empty(&mut st, &mut strings, "dma-coherent");
     end_node(&mut st);
 
     node(&mut st, "virtio_mmio@a002000");
     prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
     prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_2000, 0, 0x1000]);
     prop_cells(&mut st, &mut strings, "interrupts", &[0, 36, 4]);
+    prop_empty(&mut st, &mut strings, "dma-coherent");
     end_node(&mut st);
 
     // Userspace NAT. Linux names this eth0. The guest address is 10.0.2.15.
@@ -142,6 +145,7 @@ pub fn build(
     prop_str(&mut st, &mut strings, "compatible", "virtio,mmio");
     prop_cells(&mut st, &mut strings, "reg", &[0, 0x0a00_3000, 0, 0x1000]);
     prop_cells(&mut st, &mut strings, "interrupts", &[0, 35, 4]);
+    prop_empty(&mut st, &mut strings, "dma-coherent");
     end_node(&mut st);
 
     end_node(&mut st);
