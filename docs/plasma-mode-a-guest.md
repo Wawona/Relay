@@ -11,9 +11,10 @@ ships inside the IPA.
 |-------|--------|
 | Engine | Relay `StaticCpu` (Mode A) / VZ (macOS) / KVM (Linux) |
 | Guest GUI pipe | `waypipe --no-gpu --vsock` → host SHM importer → `IlandPresentEngine` |
-| Tip guest session (until Plasma image lands) | `weston-smoke` 800×600 SHM proof |
-| `machine-kde` card | Same guest tree; notes say Plasma; **needs Plasma guest rebuild** |
-| Terminal in-place (`\r` / ESC M / CSI K) | Landed `Terminal` `0158344` (`wrap_cont`). Host FitTerminal floors cols at 80. Tip must rebuild `.#wawona-ios-sim-backend` against that pin |
+| Tip guest session (until full Plasma image lands) | **KWin QPainter** + foot (`kwin_wayland --exit-with-session=foot`). Full `startplasma-wayland` blocked by builder TMPDIR (~2× closure) |
+| Closure budgets (aarch64) | plasma6.enable ≈ 7 GiB; plasma-workspace curated ≈ 4.1 GiB; **kwin ≈ 2.0 GiB** (fits Determinated builder) |
+| `machine-kde` card | Same guest tree; notes say Plasma; tip embeds KWin session until Plasma fits |
+| Terminal in-place (`\r` / ESC M / CSI K) | Landed `Terminal` `0158344` (`wrap_cont`). Host FitTerminal floors cols at 80. Tip backend rebuilt |
 
 ## Architecture (end state)
 
@@ -26,10 +27,11 @@ Wawona iOS Mode A
          Image + initrd + rootfs.img + manifest.json
     → guest: multi-user → wawona-session.service
          waypipe --no-gpu --vsock -s 1024 server --
-           dbus-run-session startplasma-wayland
+           dbus-run-session kwin_wayland --xwayland --exit-with-session=foot
+           (later: startplasma-wayland when image budget allows)
     → AUTH / READY on serial
     → first SHM frame → ShowSessionSurface
-    → Present = Plasma desktop (nested KWin as one Wawona window)
+    → Present = KWin nested desktop (Plasma shell when curated image fits)
 ```
 
 Software path only on Mode A StaticCpu:
@@ -45,13 +47,13 @@ No guest Vulkan/EGL ICD. Cage previously failed swapchain for the same reason.
 
 Source of truth: `Relay/import/vms/dependencies/vms/mobile/configuration.nix`
 
-- **Never** `services.desktopManager.plasma6.enable` for Mode A. Full module
-  closure ≈ 7 GiB; `make-ext4-fs` then fails with `No space left on device`
-  on the Determinated Linux builder TMPDIR, and an IPA cannot ship that image
-- Curated packages: `plasma-workspace`, `kwin`, `breeze`, `breeze-icons`,
-  `qtwayland` + English-only `i18n.supportedLocales`
+- **Never** `services.desktopManager.plasma6.enable` for Mode A (~7 GiB)
+- Tip session packages: `kwin`, `qtwayland`, `foot`, `weston` (lab) +
+  English-only `i18n.supportedLocales`. Target tip closure ≈ 2 GiB
 - `services.udisks2.enable = mkForce false` (slim StaticCpu)
-- `wawona.relay.sessionCommand = [ dbus-run-session -- startplasma-wayland ]`
+- Tip `sessionCommand`: `dbus-run-session -- kwin_wayland --xwayland --exit-with-session=foot`
+- Follow-up when builder TMPDIR / ODR allows: add `plasma-workspace` and
+  switch session to `startplasma-wayland`
 - Keep patched `weston-smoke` in the closure for lab SHM bring-up only
 - Flake artifact: `.#packages.aarch64-linux.wawona-nixos-guest-4k`
 - Manifest `memory_bytes` ≥ 2 GiB; Machines KDE card ≥ 4096 MiB RAM
