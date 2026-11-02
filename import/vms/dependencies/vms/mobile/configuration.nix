@@ -58,11 +58,14 @@
 
   # KWin as the nested compositor. Foot proves a client surface on Present.
   # Replace with startplasma-wayland when the guest image budget allows it.
+  # dbus-run-session execs `dbus-daemon` via PATH; pin dbus onto PATH so
+  # StaticCpu does not fail with ENOENT for the bus binary.
   wawona.relay.sessionCommand = [
-    "${pkgs.dbus}/bin/dbus-run-session"
-    "--"
-    "${pkgs.kdePackages.kwin}/bin/kwin_wayland"
-    "--xwayland"
-    "--exit-with-session=${pkgs.foot}/bin/foot"
+    "${pkgs.writeShellScript "wawona-kwin-session" ''
+      export PATH="${pkgs.dbus}/bin:${pkgs.kdePackages.kwin}/bin:${pkgs.foot}/bin:$PATH"
+      exec ${pkgs.dbus}/bin/dbus-run-session -- \
+        ${pkgs.kdePackages.kwin}/bin/kwin_wayland --xwayland \
+        --exit-with-session=${pkgs.foot}/bin/foot
+    ''}"
   ];
 }
