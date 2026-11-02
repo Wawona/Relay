@@ -45,8 +45,12 @@ No guest Vulkan/EGL ICD. Cage previously failed swapchain for the same reason.
 
 Source of truth: `Relay/import/vms/dependencies/vms/mobile/configuration.nix`
 
-- `services.desktopManager.plasma6.enable = true`
-- `services.udisks2.enable = mkForce false` (slim StaticCpu; conflict with Plasma default)
+- **Never** `services.desktopManager.plasma6.enable` for Mode A. Full module
+  closure ≈ 7 GiB; `make-ext4-fs` then fails with `No space left on device`
+  on the Determinated Linux builder TMPDIR, and an IPA cannot ship that image
+- Curated packages: `plasma-workspace`, `kwin`, `breeze`, `breeze-icons`,
+  `qtwayland` + English-only `i18n.supportedLocales`
+- `services.udisks2.enable = mkForce false` (slim StaticCpu)
 - `wawona.relay.sessionCommand = [ dbus-run-session -- startplasma-wayland ]`
 - Keep patched `weston-smoke` in the closure for lab SHM bring-up only
 - Flake artifact: `.#packages.aarch64-linux.wawona-nixos-guest-4k`
@@ -115,7 +119,7 @@ WWNMachinesViewModel.start
 | Risk | Mitigation |
 |------|------------|
 | Plasma too heavy for StaticCpu | 2–4 GiB RAM; software compose; accept slow first paint |
-| Rootfs size vs IPA | One 4k guest; optional later Apple ODR (not free download) |
+| Rootfs size vs IPA / builder TMPDIR | Curated plasma-workspace (not desktopManager.plasma6); English locales only; optional later Apple ODR |
 | KWin refuses QPainter nested | Fall back session: `kwin_wayland --platform wayland` then add plasmashell |
 | Tip links stale `libwawona.a` | Rebuild `.#wawona-ios-sim-backend` with Terminal tip before claiming Terminal green |
 | Eth0 / DHCP stalls | Keep `wawona-slirp-dns`; no dhcpcd; no `network-addresses-eth0` |

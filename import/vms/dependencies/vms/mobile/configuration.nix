@@ -1,20 +1,29 @@
 # User-owned guest configuration. Keep ./relay.nix imported for Wawona devices
 # and transport, then customize packages and the Wayland desktop here.
 #
-# Mode A product session: KDE Plasma 6 Wayland over waypipe --no-gpu (SHM).
-# Nested KWin paints into Wawona Present. Do not expect a guest GPU ICD.
+# Mode A product session: curated KDE Plasma 6 Wayland over waypipe --no-gpu
+# (SHM). Nested KWin paints into Wawona Present. Do not expect a guest GPU ICD.
+#
+# Hard size gate: do NOT flip services.desktopManager.plasma6.enable. That
+# module pulls ~7 GiB (locales, addons, docs) and overflows the Determinated
+# Linux builder TMPDIR inside make-ext4-fs (`No space left on device`). Mode A
+# IPA also cannot ship a 7 GiB guest. Curate plasma-workspace + kwin + breeze.
 { pkgs, lib, ... }:
 {
   imports = [ ./relay.nix ];
   networking.hostName = "wawona-mobile-guest";
   system.stateVersion = "24.11";
 
-  # Plasma 6 packages + session helpers. No SDDM: Relay's wawona-session
-  # unit launches startplasma-wayland under waypipe (same vsock path as
-  # the prior weston-smoke SHM proof).
-  services.desktopManager.plasma6.enable = true;
-  # relay.nix keeps the guest slim (udisks2 off). Plasma6 flips it on;
-  # force slim for StaticCpu boot time. Removable media is not the goal.
+  # English-only. Plasma locale trees are the biggest single fat in the
+  # full desktopManager.plasma6 closure.
+  i18n.defaultLocale = "en_US.UTF-8";
+  i18n.supportedLocales = [
+    "C.UTF-8/UTF-8"
+    "en_US.UTF-8/UTF-8"
+  ];
+
+  # No SDDM: Relay's wawona-session unit launches startplasma-wayland under
+  # waypipe (same vsock path as the prior weston-smoke SHM proof).
   services.udisks2.enable = lib.mkForce false;
 
   # weston-smoke stays packaged for lab SHM bring-up; session is Plasma.
@@ -31,11 +40,14 @@
   ];
 
   environment.systemPackages = with pkgs; [
-    cage
     foot
     wayland-utils
     weston
     kdePackages.qtwayland
+    kdePackages.kwin
+    kdePackages.plasma-workspace
+    kdePackages.breeze
+    kdePackages.breeze-icons
   ];
 
   # StaticCpu / waypipe --no-gpu: force software compose. Guest has no
