@@ -33,6 +33,11 @@ pub struct AuthListener {
 
 impl AuthListener {
     /// Serve the control protocol on a virtio-vsock host stream.
+    ///
+    /// The listen thread keeps the vsock `Receiver` until [`Drop`]. It must
+    /// **not** exit when StaticCpu's shared `stop` flips: `relay_stop` can set
+    /// that flag while retaining the session, and an early thread exit drops
+    /// the Receiver so every later guest dial hits `try_send=disconnected`.
     pub fn serve_connection(
         connections: std::sync::mpsc::Receiver<crate::vsock::VsockConnection>,
         key: SessionKey,
@@ -45,24 +50,33 @@ impl AuthListener {
         let thread_stop = Arc::new(AtomicBool::new(false));
         let thread_stop_w = Arc::clone(&thread_stop);
         let join = thread::spawn(move || {
-            while !session_stop.load(Ordering::Acquire)
-                && !thread_stop_w.load(Ordering::Acquire)
-            {
+            // Only `thread_stop` (Drop) ends this loop. `session_stop` only
+            // refuses new handshakes so a retained-after-stop session cannot
+            // wedge a new guest forever, without killing the mpsc Receiver.
+            while !thread_stop_w.load(Ordering::Acquire) {
                 match connections.recv_timeout(Duration::from_millis(50)) {
-                    Ok(connection) => match serve_one(connection.stream, &key, &challenge) {
-                        Ok(outcome) => {
-                            if let Ok(mut guard) = ready_w.lock() {
-                                *guard = Some(outcome);
+                    Ok(connection) => {
+                        if session_stop.load(Ordering::Acquire) {
+                            eprintln!(
+                                "relay auth: drop dial while session stopping (receiver sticky)"
+                            );
+                            drop(connection);
+                            continue;
+                        }
+                        match serve_one(connection.stream, &key, &challenge) {
+                            Ok(outcome) => {
+                                if let Ok(mut guard) = ready_w.lock() {
+                                    *guard = Some(outcome);
+                                }
+                                eprintln!(
+                                    "relay auth: sticky listener alive (post-OK, receiver held)"
+                                );
                             }
-                            // Keep the vsock Receiver alive. Returning here
-                            // dropped the channel and every later guest connect
-                            // to 1025 became ECONNRESET (try_send=disconnected).
-                            // Guest Restart=on-failure must be able to re-auth.
+                            Err(err) => {
+                                eprintln!("relay auth: handshake failed: {err}");
+                            }
                         }
-                        Err(err) => {
-                            eprintln!("relay auth: handshake failed: {err}");
-                        }
-                    },
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 }
@@ -198,11 +212,19 @@ fn serve_one(
     writer
         .flush()
         .map_err(|e| RelayError::Failed(format!("auth ack flush: {e}")))?;
-    // Half-close write and wait for guest EOF so virtio-vsock can drain OK
-    // before the Unix peer disappears. Dropping both ends immediately after
-    // write raced StaticCpu poll and delivered empty ack to the guest.
+    eprintln!(
+        "relay auth: WWN1 OK machine={} session={}",
+        response.machine_id, response.session_id
+    );
+    // Hold the host Unix peer open across StaticCpu poll windows so OK bytes
+    // reach the guest before either end disappears. A short pre-shutdown pause
+    // plus a long drain beat the previous 30s race that left guest bad-ack
+    // (empty readline) while host already returned.
+    for _ in 0..40 {
+        thread::sleep(Duration::from_millis(50));
+    }
     let _ = writer.shutdown(Shutdown::Write);
-    let drain_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let drain_deadline = std::time::Instant::now() + AUTH_IO_TIMEOUT;
     let mut sink = [0u8; 64];
     while std::time::Instant::now() < drain_deadline {
         match reader.read(&mut sink) {
@@ -219,10 +241,6 @@ fn serve_one(
             Err(_) => break,
         }
     }
-    eprintln!(
-        "relay auth: WWN1 OK machine={} session={}",
-        response.machine_id, response.session_id
-    );
     Ok(AuthenticatedReady {
         machine_id: response.machine_id,
         session_id: response.session_id,
@@ -278,7 +296,7 @@ mod tests {
         // Close guest so host drain-after-OK observes EOF promptly.
         drop(reader);
         drop(guest);
-        for _ in 0..100 {
+        for _ in 0..200 {
             if listener.peek_ready().is_some() {
                 break;
             }
@@ -289,5 +307,26 @@ mod tests {
         assert_eq!(ready.unit_state, "multi-user+wawona-session");
         // Receiver must stay alive after success (no try_send=disconnected).
         assert!(listener.peek_ready().is_none());
+    }
+
+    #[test]
+    fn receiver_stays_alive_when_session_stop_flips() {
+        let key = SessionKey::derive(&[4u8; 32], "khash", "rhash");
+        let challenge =
+            SessionChallenge::new("E4A1C0DE", "sess", "khash", "rhash", [5u8; 32]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = AuthListener::serve_connection(rx, key, challenge, Arc::clone(&stop));
+        stop.store(true, Ordering::Release);
+        thread::sleep(Duration::from_millis(100));
+        let (host, _guest) = UnixStream::pair().unwrap();
+        // Sender still connected: listen thread must not have dropped Receiver.
+        tx.try_send(crate::vsock::VsockConnection {
+            guest_port: 11,
+            host_port: CONTROL_VSOCK_PORT,
+            stream: host,
+        })
+        .expect("receiver must stay alive after session stop");
+        drop(listener);
     }
 }
