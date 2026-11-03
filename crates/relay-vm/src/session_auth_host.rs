@@ -57,8 +57,11 @@ impl AuthListener {
                 match connections.recv_timeout(Duration::from_millis(50)) {
                     Ok(connection) => {
                         if session_stop.load(Ordering::Acquire) {
-                            eprintln!(
-                                "relay auth: drop dial while session stopping (receiver sticky)"
+                            // Never eprintln!: broken simctl PTY EIO panics the
+                            // auth thread, drops the vsock Receiver, and every
+                            // later guest dial hits try_send=disconnected.
+                            crate::vsock::vsock_debug_log(
+                                "relay auth: drop dial while session stopping (receiver sticky)",
                             );
                             drop(connection);
                             continue;
@@ -68,12 +71,14 @@ impl AuthListener {
                                 if let Ok(mut guard) = ready_w.lock() {
                                     *guard = Some(outcome);
                                 }
-                                eprintln!(
-                                    "relay auth: sticky listener alive (post-OK, receiver held)"
+                                crate::vsock::vsock_debug_log(
+                                    "relay auth: sticky listener alive (post-OK, receiver held)",
                                 );
                             }
                             Err(err) => {
-                                eprintln!("relay auth: handshake failed: {err}");
+                                crate::vsock::vsock_debug_log(&format!(
+                                    "relay auth: handshake failed: {err}"
+                                ));
                             }
                         }
                     }
@@ -160,7 +165,9 @@ fn run_listener(
                     }
                 }
                 Err(err) => {
-                    eprintln!("relay auth: handshake failed: {err}");
+                    crate::vsock::vsock_debug_log(&format!(
+                        "relay auth: handshake failed: {err}"
+                    ));
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -199,23 +206,26 @@ fn serve_one(
     writer
         .flush()
         .map_err(|e| RelayError::Failed(format!("auth flush: {e}")))?;
-    eprintln!("relay auth: sent WWN1 KEY+CHALLENGE; waiting READY");
+    // Log after flush only via fallible file/stderr (never eprintln!).
+    crate::vsock::vsock_debug_log("relay auth: sent WWN1 KEY+CHALLENGE; waiting READY");
     let mut line = String::new();
     reader
         .read_line(&mut line)
         .map_err(|e| RelayError::Failed(format!("auth read: {e}")))?;
     let response = SessionResponse::parse(&line)?;
     verify_response(challenge, &response, key)?;
+    // Write OK before any logging so a log panic cannot strand the guest on
+    // bad-ack:'' after READY was already accepted.
     writer
         .write_all(b"WWN1 OK\n")
         .map_err(|e| RelayError::Failed(format!("auth ack: {e}")))?;
     writer
         .flush()
         .map_err(|e| RelayError::Failed(format!("auth ack flush: {e}")))?;
-    eprintln!(
+    crate::vsock::vsock_debug_log(&format!(
         "relay auth: WWN1 OK machine={} session={}",
         response.machine_id, response.session_id
-    );
+    ));
     // Hold the host Unix peer open across StaticCpu poll windows so OK bytes
     // reach the guest before either end disappears. A short pre-shutdown pause
     // plus a long drain beat the previous 30s race that left guest bad-ack
