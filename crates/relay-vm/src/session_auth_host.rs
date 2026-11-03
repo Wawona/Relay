@@ -6,7 +6,8 @@ use crate::guest_session::{
     verify_response, SessionChallenge, SessionKey, SessionResponse, CONTROL_VSOCK_PORT,
 };
 use relay_core::RelayError;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,14 +49,20 @@ impl AuthListener {
                 && !thread_stop_w.load(Ordering::Acquire)
             {
                 match connections.recv_timeout(Duration::from_millis(50)) {
-                    Ok(connection) => {
-                        if let Ok(outcome) = serve_one(connection.stream, &key, &challenge) {
+                    Ok(connection) => match serve_one(connection.stream, &key, &challenge) {
+                        Ok(outcome) => {
                             if let Ok(mut guard) = ready_w.lock() {
                                 *guard = Some(outcome);
                             }
-                            return;
+                            // Keep the vsock Receiver alive. Returning here
+                            // dropped the channel and every later guest connect
+                            // to 1025 became ECONNRESET (try_send=disconnected).
+                            // Guest Restart=on-failure must be able to re-auth.
                         }
-                    }
+                        Err(err) => {
+                            eprintln!("relay auth: handshake failed: {err}");
+                        }
+                    },
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 }
@@ -132,14 +139,16 @@ fn run_listener(
 ) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
-            Ok((stream, _)) => {
-                if let Ok(outcome) = serve_one(stream, &key, &challenge) {
+            Ok((stream, _)) => match serve_one(stream, &key, &challenge) {
+                Ok(outcome) => {
                     if let Ok(mut guard) = ready.lock() {
                         *guard = Some(outcome);
                     }
-                    return;
                 }
-            }
+                Err(err) => {
+                    eprintln!("relay auth: handshake failed: {err}");
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(20));
             }
@@ -153,11 +162,14 @@ fn serve_one(
     key: &SessionKey,
     challenge: &SessionChallenge,
 ) -> Result<AuthenticatedReady, RelayError> {
+    // StaticCpu vsock poll is wall-clock slow. 45s left mid-handshake EOF and
+    // AUTH_FAIL=bad-ack on the guest while the host still held the challenge.
+    const AUTH_IO_TIMEOUT: Duration = Duration::from_secs(180);
     stream
-        .set_read_timeout(Some(Duration::from_secs(45)))
+        .set_read_timeout(Some(AUTH_IO_TIMEOUT))
         .map_err(|e| RelayError::Failed(format!("auth timeout: {e}")))?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(45)))
+        .set_write_timeout(Some(AUTH_IO_TIMEOUT))
         .map_err(|e| RelayError::Failed(format!("auth timeout: {e}")))?;
     let mut writer = stream.try_clone().map_err(|e| {
         RelayError::Failed(format!("auth clone: {e}"))
@@ -183,6 +195,30 @@ fn serve_one(
     writer
         .write_all(b"WWN1 OK\n")
         .map_err(|e| RelayError::Failed(format!("auth ack: {e}")))?;
+    writer
+        .flush()
+        .map_err(|e| RelayError::Failed(format!("auth ack flush: {e}")))?;
+    // Half-close write and wait for guest EOF so virtio-vsock can drain OK
+    // before the Unix peer disappears. Dropping both ends immediately after
+    // write raced StaticCpu poll and delivered empty ack to the guest.
+    let _ = writer.shutdown(Shutdown::Write);
+    let drain_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut sink = [0u8; 64];
+    while std::time::Instant::now() < drain_deadline {
+        match reader.read(&mut sink) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+    }
     eprintln!(
         "relay auth: WWN1 OK machine={} session={}",
         response.machine_id, response.session_id
@@ -239,7 +275,10 @@ mod tests {
         let mut ack = String::new();
         reader.read_line(&mut ack).unwrap();
         assert!(ack.starts_with("WWN1 OK"));
-        for _ in 0..50 {
+        // Close guest so host drain-after-OK observes EOF promptly.
+        drop(reader);
+        drop(guest);
+        for _ in 0..100 {
             if listener.peek_ready().is_some() {
                 break;
             }
@@ -248,5 +287,7 @@ mod tests {
         let ready = listener.take_ready().expect("authenticated ready");
         assert_eq!(ready.machine_id, "E4A1C0DE");
         assert_eq!(ready.unit_state, "multi-user+wawona-session");
+        // Receiver must stay alive after success (no try_send=disconnected).
+        assert!(listener.peek_ready().is_none());
     }
 }

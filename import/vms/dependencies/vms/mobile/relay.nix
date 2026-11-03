@@ -657,7 +657,8 @@ in
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      TimeoutStartSec = "180s";
+      # StaticCpu vsock RTT can exceed 45s wall. Match host AUTH_IO_TIMEOUT.
+      TimeoutStartSec = "300s";
       Restart = "on-failure";
       RestartSec = "3s";
       StandardOutput = "journal+console";
@@ -686,7 +687,7 @@ except (AttributeError, OSError):
         print("WAWONA_RELAY_AUTH_SKIP=no-af-vsock")
         sys.exit(0)
     s = socket.fromfd(fd, AF_VSOCK, socket.SOCK_STREAM)
-s.settimeout(45)
+s.settimeout(180)
 try:
     s.connect((2, 1025))
 except OSError as exc:
@@ -717,7 +718,7 @@ f.flush()
 ack = f.readline().decode().strip()
 print(ack)
 if not ack.startswith("WWN1 OK"):
-    print("WAWONA_RELAY_AUTH_FAIL=bad-ack")
+    print(f"WAWONA_RELAY_AUTH_FAIL=bad-ack:{ack!r}")
     sys.exit(1)
 print("WAWONA_RELAY_AUTH_OK=1")
 PY
