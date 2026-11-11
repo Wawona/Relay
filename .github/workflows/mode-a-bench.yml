@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   bench:
-    runs-on: macos-14
+    runs-on: macos-27
     steps:
       - uses: actions/checkout@v4
 
